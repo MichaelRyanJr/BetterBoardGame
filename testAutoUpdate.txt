@@ -1,1 +1,0 @@
-This is a test to ensure auto git updates are working on the Raspberry Pis
