@@ -50,31 +50,31 @@ class TestGameService(unittest.TestCase):
 
     def test_illegal_candidate_move_returns_error(self):
         service = GameService()
-
+    
         # This is illegal because it is a horizontal move.
         move = Move(
             player=Player.BLACK,
             from_square=Coordinate(2, 1),
             to_square=Coordinate(2, 3)
         )
-
+    
         message = build_candidate_move_message(
             move=move,
             game_id=service.state.game_id,
             session_id=service.state.session_id,
             source="BBG-BoardA"
         )
-
+    
         response_messages = service.handle_incoming_message(message)
-
+    
         self.assertEqual(len(response_messages), 1)
         self.assertEqual(response_messages[0]["event_type"], EventType.ERROR.value)
-
+    
         error_data = parse_error_message(response_messages[0])
-
+    
         self.assertEqual(error_data["error_code"], ErrorCode.ILLEGAL_DIRECTION)
         self.assertEqual(error_data["message"], "Moves must be diagonal.")
-
+        
     def test_capture_move_returns_state_sync_and_piece_removed_required(self):
         board = GameState.empty_board()
         board[2][1] = Piece(owner=Player.BLACK)
