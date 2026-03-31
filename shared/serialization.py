@@ -6,95 +6,95 @@ from shared.move_validation import ValidationResult
 
 
 def dict_to_json(data):
-    " Convert a Python dictionary into a JSON string
+    """ Convert a Python dictionary into a JSON string """
     return json.dumps(data)
 
 
 def json_to_dict(json_text):
-    " Convert a JSON string into a Python dictionary
+    """ Convert a JSON string into a Python dictionary """
     return json.loads(json_text)
 
 
 def coordinate_to_dict(coordinate):
-    " Convert a Coordinate object into a dictionary
+    """ Convert a Coordinate object into a dictionary """
     return coordinate.to_dict()
 
 
 def coordinate_from_dict(data):
-    " Build a Coordinate object from dictionary data
+    """ Build a Coordinate object from dictionary data """
     return Coordinate.from_dict(data)
 
 
 def coordinate_to_json(coordinate):
-    " Convert a Coordinate object directly into a JSON string
+    """ Convert a Coordinate object directly into a JSON string """
     return dict_to_json(coordinate_to_dict(coordinate))
 
 
 def coordinate_from_json(json_text):
-    " Build a Coordinate object directly from a JSON string
+    """ Build a Coordinate object directly from a JSON string """
     data = json_to_dict(json_text)
     return coordinate_from_dict(data)
 
 
 def piece_to_dict(piece):
-    " Convert a Piece object into a dictionary
+    """ Convert a Piece object into a dictionary """
     return piece.to_dict()
 
 
 def piece_from_dict(data):
-    " Build a Piece object from dictionary data
+    """ Build a Piece object from dictionary data """
     return Piece.from_dict(data)
 
 
 def piece_to_json(piece):
-    " Convert a Piece object directly into a JSON string
+    """ Convert a Piece object directly into a JSON string """
     return dict_to_json(piece_to_dict(piece))
 
 
 def piece_from_json(json_text):
-    " Build a Piece object directly from a JSON string
+    """ Build a Piece object directly from a JSON string """
     data = json_to_dict(json_text)
     return piece_from_dict(data)
 
 
 def move_to_dict(move):
-    " Convert a Move object into a dictionary
+    """ Convert a Move object into a dictionary """
     return move.to_dict()
 
 
 def move_from_dict(data):
-    " Build a Move object from dictionary data
+    """ Build a Move object from dictionary data """
     return Move.from_dict(data)
 
 
 def move_to_json(move):
-    " Convert a Move object directly into a JSON string
+    """ Convert a Move object directly into a JSON string """
     return dict_to_json(move_to_dict(move))
 
 
 def move_from_json(json_text):
-    "Build a Move object directly from a JSON string
+    """Build a Move object directly from a JSON string """
     data = json_to_dict(json_text)
     return move_from_dict(data)
 
 
 def game_state_to_dict(state):
-    "Convert a GameState object into a dictionary
+    """Convert a GameState object into a dictionary """
     return state.to_dict()
 
 
 def game_state_from_dict(data):
-    " Build a GameState object from dictionary data
+    """ Build a GameState object from dictionary data """
     return GameState.from_dict(data)
 
 
 def game_state_to_json(state):
-    " Convert a GameState object directly into a JSON string
+    """ Convert a GameState object directly into a JSON string """
     return dict_to_json(game_state_to_dict(state))
 
 
 def game_state_from_json(json_text):
-    "Build a GameState object directly from a JSON string
+    """ Build a GameState object directly from a JSON string """
     data = json_to_dict(json_text)
     return game_state_from_dict(data)
 
@@ -138,7 +138,7 @@ def applied_move_to_dict(applied_move):
 
 
 def applied_move_from_dict(data):
-    "Build an AppliedMove object from dictionary data
+    """Build an AppliedMove object from dictionary data """
 
     captured_list = []
     for square in data.get("captured_squares", []):
@@ -171,12 +171,12 @@ def applied_move_from_dict(data):
 
 
 def applied_move_to_json(applied_move):
-    " Convert an AppliedMove object directly into a JSON string
+    """ Convert an AppliedMove object directly into a JSON string """
     return dict_to_json(applied_move_to_dict(applied_move))
 
 
 def applied_move_from_json(json_text):
-    " Build an AppliedMove object directly from a JSON string
+    """ Build an AppliedMove object directly from a JSON string """
     data = json_to_dict(json_text)
     return applied_move_from_dict(data)
 
@@ -214,7 +214,7 @@ def validation_result_to_dict(result):
 
 
 def validation_result_from_dict(data):
-    " Build a ValidationResult object from dictionary data
+    """ Build a ValidationResult object from dictionary data """
 
     captured_list = []
     for square in data.get("captured_squares", []):
@@ -241,11 +241,11 @@ def validation_result_from_dict(data):
 
 
 def validation_result_to_json(result):
-    "Convert a ValidationResult object directly into a JSON string
+    """Convert a ValidationResult object directly into a JSON string """
     return dict_to_json(validation_result_to_dict(result))
 
 
 def validation_result_from_json(json_text):
-    "Build a ValidationResult object directly from a JSON string
+    """Build a ValidationResult object directly from a JSON string """
     data = json_to_dict(json_text)
     return validation_result_from_dict(data)
