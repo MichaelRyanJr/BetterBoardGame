@@ -4,6 +4,7 @@ import socket
 from threading import Event, Lock, Thread
 
 from board.board_client import BoardClient, DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT
+from board.token_scanner import TokenScanner, clone_scan_matrix
 from shared.constants import EventType
 from shared.game_state import Coordinate, Move
 
@@ -18,6 +19,7 @@ except ImportError as exc:
 
 
 DEFAULT_HEARTBEAT_INTERVAL = 15.0
+DEFAULT_SCAN_INTERVAL = 1.0
 
 
 class BoardMain:
@@ -42,6 +44,10 @@ class BoardMain:
         self.websocket = None
         self.websocket_lock = Lock()
         self.stop_event = Event()
+
+        self.scanner = TokenScanner(mode="mock", stable_reads_required=2)
+        self.scan_interval = DEFAULT_SCAN_INTERVAL
+        self.last_stable_scan_sent = None
 
     def build_server_uri(self):
         """Build the WebSocket URI for the server."""
@@ -210,6 +216,44 @@ class BoardMain:
                 logging.exception("Heartbeat send failed.")
                 return
 
+    def scan_loop(self):
+        """Read scanner updates and send scan messages to the server."""
+        if self.scan_interval <= 0:
+            return
+
+        while not self.stop_event.wait(self.scan_interval):
+            try:
+                scan_matrix = self.scanner.read_scan_matrix()
+                snapshot_sent = self.send_scan_snapshot(scan_matrix)
+
+                if snapshot_sent:
+                    logging.debug("Raw scan_snapshot sent.")
+
+                if self.scanner.is_current_scan_stable():
+                    should_send_stable = False
+
+                    if self.last_stable_scan_sent is None:
+                        should_send_stable = True
+                    elif scan_matrix != self.last_stable_scan_sent:
+                        should_send_stable = True
+
+                    if should_send_stable:
+                        stable_sent = self.send_stable_scan(scan_matrix)
+
+                        if stable_sent:
+                            logging.debug("Stable stable_scan sent.")
+
+                        self.last_stable_scan_sent = clone_scan_matrix(scan_matrix)
+                else:
+                    self.last_stable_scan_sent = None
+
+            except ConnectionClosed:
+                logging.info("Scan loop stopped because connection closed.")
+                return
+            except Exception:
+                logging.exception("Scan loop failed.")
+                return
+
     def receive_loop(self):
         """Receive messages from the server until the connection closes."""
         with self.websocket_lock:
@@ -241,6 +285,12 @@ class BoardMain:
                 )
                 heartbeat_thread.start()
 
+                scan_thread = Thread(
+                    target=self.scan_loop,
+                    daemon=True
+                )
+                scan_thread.start()
+
                 self.receive_loop()
 
         except KeyboardInterrupt:
@@ -250,6 +300,7 @@ class BoardMain:
         finally:
             self.stop_event.set()
             self.clear_websocket()
+            self.scanner.shutdown()
             logging.info("Board runtime exited.")
 
 
