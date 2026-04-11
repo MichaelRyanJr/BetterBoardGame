@@ -3,8 +3,8 @@ import logging
 import socket
 from threading import Event, Lock, Thread
 
-from board.board_client import BoardClient, DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT
-from board.token_scanner import TokenScanner, clone_scan_matrix
+from board.board_client import DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT
+from board.board_controller import BoardController
 from shared.constants import EventType
 from shared.game_state import Coordinate, Move
 
@@ -35,19 +35,22 @@ class BoardMain:
         self.server_port = server_port
         self.heartbeat_interval = heartbeat_interval
 
-        self.client = BoardClient(
+        self.controller = BoardController(
             board_id=board_id,
             server_host=server_host,
             server_port=server_port
         )
 
+        # Keep these references for compatibility with the existing runtime code.
+        self.client = self.controller.client
+        self.scanner = self.controller.scanner
+        self.led_driver = self.controller.led_driver
+
         self.websocket = None
         self.websocket_lock = Lock()
         self.stop_event = Event()
 
-        self.scanner = TokenScanner(mode="mock", stable_reads_required=2)
         self.scan_interval = DEFAULT_SCAN_INTERVAL
-        self.last_stable_scan_sent = None
 
     def build_server_uri(self):
         """Build the WebSocket URI for the server."""
@@ -149,8 +152,9 @@ class BoardMain:
         )
 
     def handle_server_message(self, message_text):
-        """Pass one server JSON message into BoardClient and log the result."""
-        result = self.client.handle_incoming_json(message_text)
+        """Pass one server JSON message into BoardController and log the result."""
+        self.controller.client = self.client
+        result = self.controller.handle_incoming_json(message_text)
         event_type = result["event_type"]
 
         if event_type == EventType.STATE_SYNC:
@@ -217,35 +221,41 @@ class BoardMain:
                 return
 
     def scan_loop(self):
-        """Read scanner updates and send scan messages to the server."""
+        """Read scanner updates through the controller and send scan messages."""
         if self.scan_interval <= 0:
             return
 
         while not self.stop_event.wait(self.scan_interval):
             try:
-                scan_matrix = self.scanner.read_scan_matrix()
-                snapshot_sent = self.send_scan_snapshot(scan_matrix)
+                self.controller.client = self.client
+                self.controller.scanner = self.scanner
 
-                if snapshot_sent:
-                    logging.debug("Raw scan_snapshot sent.")
+                outbound_messages = self.controller.poll_scanner_and_build_outgoing_messages()
 
-                if self.scanner.is_current_scan_stable():
-                    should_send_stable = False
+                for message in outbound_messages:
+                    event_type = EventType(message["event_type"])
 
-                    if self.last_stable_scan_sent is None:
-                        should_send_stable = True
-                    elif scan_matrix != self.last_stable_scan_sent:
-                        should_send_stable = True
+                    if event_type == EventType.SCAN_SNAPSHOT:
+                        scan_matrix = message["payload"]["scan_matrix"]
+                        sent = self.send_scan_snapshot(scan_matrix)
 
-                    if should_send_stable:
-                        stable_sent = self.send_stable_scan(scan_matrix)
+                        if sent:
+                            logging.debug("Raw scan_snapshot sent.")
+                        continue
 
-                        if stable_sent:
+                    if event_type == EventType.STABLE_SCAN:
+                        scan_matrix = message["payload"]["scan_matrix"]
+                        sent = self.send_stable_scan(scan_matrix)
+
+                        if sent:
                             logging.debug("Stable stable_scan sent.")
+                        continue
 
-                        self.last_stable_scan_sent = clone_scan_matrix(scan_matrix)
-                else:
-                    self.last_stable_scan_sent = None
+                    json_text = self.client.encode_message(message)
+                    sent = self.send_json(json_text)
+
+                    if sent:
+                        logging.debug("Scanner-generated message sent: %s", event_type.value)
 
             except ConnectionClosed:
                 logging.info("Scan loop stopped because connection closed.")
@@ -300,7 +310,7 @@ class BoardMain:
         finally:
             self.stop_event.set()
             self.clear_websocket()
-            self.scanner.shutdown()
+            self.controller.shutdown()
             logging.info("Board runtime exited.")
 
 
