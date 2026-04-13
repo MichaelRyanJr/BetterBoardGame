@@ -38,7 +38,9 @@ class BoardMain:
         self.controller = BoardController(
             board_id=board_id,
             server_host=server_host,
-            server_port=server_port
+            server_port=server_port,
+            scanner_mode="gpio",
+            led_mode="hardware"
         )
 
         # Keep these references for compatibility with the existing runtime code.
