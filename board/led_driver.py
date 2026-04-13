@@ -1,4 +1,4 @@
-from shared.constants import BOARD_SIZE, LED_OFF, LED_ON
+from shared.constants import BOARD_SIZE, LED_OFF, LED_ON, is_dark_square
 
 try:
     import spidev
@@ -119,6 +119,26 @@ def build_opponent_led_matrix(state, local_player):
     return build_piece_led_matrix_for_player(state, opponent)
 
 
+def build_hardware_safe_led_matrix(led_matrix):
+    """
+    Return a matrix safe for the physical board.
+
+    The software still uses a full 8x8 matrix, but the real board only
+    has LEDs on playable dark squares, so light squares are forced off.
+    """
+    normalized_matrix = normalize_led_matrix(led_matrix)
+    safe_matrix = empty_led_matrix()
+
+    for row in range(BOARD_SIZE):
+        for col in range(BOARD_SIZE):
+            if not is_dark_square(row, col):
+                safe_matrix[row][col] = LED_OFF
+            else:
+                safe_matrix[row][col] = normalized_matrix[row][col]
+
+    return safe_matrix
+
+
 class LEDDriver:
     """
     Control the 8x8 board LED output.
@@ -138,7 +158,7 @@ class LEDDriver:
 
     def __init__(
         self,
-        mode="mock",
+        mode="hardware",
         initial_led_matrix=None,
         spi_bus=DEFAULT_SPI_BUS,
         spi_device=DEFAULT_SPI_DEVICE,
@@ -162,6 +182,7 @@ class LEDDriver:
             return
 
         if self.mode == "hardware":
+            self.led_matrix = build_hardware_safe_led_matrix(self.led_matrix)
             self._open_spi()
             self._initialize_max7219()
             self._write_led_matrix_to_hardware(self.led_matrix)
@@ -205,7 +226,7 @@ class LEDDriver:
         self.spi.xfer2([int(register_address), int(register_value)])
 
     def _initialize_max7219(self):
-        """Configure the MAX7219 for an 8x8 raw LED matrix."""
+        """Configure the MAX7219 for raw 8x8 matrix control."""
         self._write_register(MAX7219_REG_DISPLAY_TEST, 0)
         self._write_register(MAX7219_REG_DECODE_MODE, 0)
         self._write_register(MAX7219_REG_SCAN_LIMIT, 7)
@@ -245,29 +266,31 @@ class LEDDriver:
 
     def _write_led_matrix_to_hardware(self, led_matrix):
         """Send the full 8x8 matrix to the MAX7219."""
+        safe_matrix = build_hardware_safe_led_matrix(led_matrix)
+
         for row in range(BOARD_SIZE):
             register_address = self._software_row_to_digit_register(row)
-            row_value = self._build_row_byte(led_matrix[row])
+            row_value = self._build_row_byte(safe_matrix[row])
             self._write_register(register_address, row_value)
 
     def _apply_mock_led_matrix(self, led_matrix):
         """Store the LED matrix in mock mode."""
-        return
+        self.led_matrix = clone_led_matrix(led_matrix)
 
     def _apply_hardware_led_matrix(self, led_matrix):
         """Send the LED matrix to the MAX7219."""
-        self._write_led_matrix_to_hardware(led_matrix)
+        safe_matrix = build_hardware_safe_led_matrix(led_matrix)
+        self._write_led_matrix_to_hardware(safe_matrix)
+        self.led_matrix = clone_led_matrix(safe_matrix)
 
     def _apply_led_matrix(self, led_matrix):
         """Send one LED matrix to the active driver mode."""
         if self.mode == "mock":
             self._apply_mock_led_matrix(led_matrix)
-            self.led_matrix = clone_led_matrix(led_matrix)
             return
 
         if self.mode == "hardware":
             self._apply_hardware_led_matrix(led_matrix)
-            self.led_matrix = clone_led_matrix(led_matrix)
             return
 
         raise ValueError("Unsupported LED driver mode: " + str(self.mode))
