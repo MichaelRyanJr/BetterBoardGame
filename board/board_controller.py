@@ -30,9 +30,9 @@ class BoardController:
         scanner=None,
         led_driver=None,
         client=None,
-        scanner_mode="mock",
+        scanner_mode="gpio",
         scanner_stable_reads_required=2,
-        led_mode="mock"
+        led_mode="hardware"
     ):
         self.board_id = board_id
         self.local_player = local_player
