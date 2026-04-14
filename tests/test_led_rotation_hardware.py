@@ -42,6 +42,16 @@ def is_dark_square(row, col):
     return (row + col) % 2 == 1
 
 
+def is_logical_playable_square(row, col, playable_color):
+    if playable_color == "dark":
+        return is_dark_square(row, col)
+
+    if playable_color == "light":
+        return not is_dark_square(row, col)
+
+    raise ValueError("Unsupported playable_color: " + str(playable_color))
+
+
 def empty_matrix():
     matrix = []
 
@@ -54,74 +64,25 @@ def empty_matrix():
     return matrix
 
 
-def clone_matrix(matrix):
-    cloned = []
+def map_logical_to_physical(row, col, rotation):
+    """
+    Convert one logical board coordinate into the physical coordinate
+    currently wired on the MAX7219 board.
 
-    for row in matrix:
-        cloned_row = []
-
-        for value in row:
-            cloned_row.append(int(value))
-
-        cloned.append(cloned_row)
-
-    return cloned
-
-
-def rotate_matrix_clockwise(matrix):
-    rotated = []
-
-    for row in range(BOARD_SIZE):
-        new_row = []
-
-        for col in range(BOARD_SIZE):
-            new_row.append(matrix[BOARD_SIZE - 1 - col][row])
-
-        rotated.append(new_row)
-
-    return rotated
-
-
-def rotate_matrix_counterclockwise(matrix):
-    rotated = []
-
-    for row in range(BOARD_SIZE):
-        new_row = []
-
-        for col in range(BOARD_SIZE):
-            new_row.append(matrix[col][BOARD_SIZE - 1 - row])
-
-        rotated.append(new_row)
-
-    return rotated
-
-
-def rotate_matrix_180(matrix):
-    rotated = []
-
-    for row in range(BOARD_SIZE):
-        new_row = []
-
-        for col in range(BOARD_SIZE):
-            new_row.append(matrix[BOARD_SIZE - 1 - row][BOARD_SIZE - 1 - col])
-
-        rotated.append(new_row)
-
-    return rotated
-
-
-def logical_to_physical_matrix(logical_matrix, rotation):
+    rotation describes how the PHYSICAL board is rotated relative to
+    the logical software orientation.
+    """
     if rotation == "none":
-        return clone_matrix(logical_matrix)
+        return row, col
 
     if rotation == "cw":
-        return rotate_matrix_clockwise(logical_matrix)
+        return col, BOARD_SIZE - 1 - row
 
     if rotation == "ccw":
-        return rotate_matrix_counterclockwise(logical_matrix)
+        return BOARD_SIZE - 1 - col, row
 
     if rotation == "180":
-        return rotate_matrix_180(logical_matrix)
+        return BOARD_SIZE - 1 - row, BOARD_SIZE - 1 - col
 
     raise ValueError("Unsupported rotation: " + str(rotation))
 
@@ -145,6 +106,7 @@ class RawMAX7219:
         self.spi.mode = 0
 
         self.brightness = int(brightness)
+
         if self.brightness < 0 or self.brightness > 15:
             raise ValueError("brightness must be between 0 and 15.")
 
@@ -165,15 +127,19 @@ class RawMAX7219:
         for register_address in range(MAX7219_REG_DIGIT0, MAX7219_REG_DIGIT7 + 1):
             self.write_register(register_address, 0)
 
-    def software_row_to_digit_register(self, row):
-        # Physical matrix row 0 is the top row.
-        # DIG7 controls the top row and DIG0 controls the bottom row.
+    def physical_row_to_digit_register(self, row):
+        """
+        Physical row 0 is the top row.
+        DIG7 controls the top row and DIG0 controls the bottom row.
+        """
         digit_index = (BOARD_SIZE - 1) - row
         return MAX7219_REG_DIGIT0 + digit_index
 
     def build_row_byte(self, row_values):
-        # Bit 0 -> SEG A -> leftmost column
-        # Bit 7 -> SEG DP -> rightmost column
+        """
+        Bit 0 -> SEG A  -> leftmost physical column
+        Bit 7 -> SEG DP -> rightmost physical column
+        """
         row_byte = 0
 
         for col in range(BOARD_SIZE):
@@ -184,7 +150,7 @@ class RawMAX7219:
 
     def write_matrix(self, matrix):
         for row in range(BOARD_SIZE):
-            register_address = self.software_row_to_digit_register(row)
+            register_address = self.physical_row_to_digit_register(row)
             row_byte = self.build_row_byte(matrix[row])
             self.write_register(register_address, row_byte)
 
@@ -196,48 +162,67 @@ class RawMAX7219:
             self.spi.close()
 
 
-def run_single_led_scan(driver, delay_seconds, rotation):
+def run_single_led_scan(driver, delay_seconds, rotation, playable_color):
     """
-    Light one logical playable square at a time, then rotate it into
-    physical board orientation before sending it to hardware.
+    Light one logical playable square at a time.
     """
-    for row in range(BOARD_SIZE):
-        print("Testing logical row", row)
+    for logical_row in range(BOARD_SIZE):
+        print("Testing logical row", logical_row)
 
-        for col in range(BOARD_SIZE):
-            if not is_dark_square(row, col):
+        for logical_col in range(BOARD_SIZE):
+            if not is_logical_playable_square(logical_row, logical_col, playable_color):
                 continue
 
-            print("  Lighting logical square row=", row, "col=", col)
+            physical_row, physical_col = map_logical_to_physical(
+                logical_row,
+                logical_col,
+                rotation
+            )
 
-            logical_matrix = empty_matrix()
-            logical_matrix[row][col] = 1
+            print(
+                "  Lighting logical square row=", logical_row,
+                "col=", logical_col,
+                "-> physical row=", physical_row,
+                "col=", physical_col
+            )
 
-            physical_matrix = logical_to_physical_matrix(logical_matrix, rotation)
-            driver.write_matrix(physical_matrix)
+            matrix = empty_matrix()
+            matrix[physical_row][physical_col] = 1
+
+            driver.write_matrix(matrix)
             sleep(delay_seconds)
 
     driver.clear()
 
 
-def run_row_fill_scan(driver, delay_seconds, rotation):
+def run_row_fill_scan(driver, delay_seconds, rotation, playable_color):
     """
-    Fill the logical playable squares in each row from left to right,
-    then rotate that pattern into physical board orientation.
+    Fill each logical playable row from left to right.
     """
-    for row in range(BOARD_SIZE):
-        print("Filling logical playable squares in row", row)
+    for logical_row in range(BOARD_SIZE):
+        print("Filling logical playable squares in row", logical_row)
 
-        logical_matrix = empty_matrix()
+        matrix = empty_matrix()
 
-        for col in range(BOARD_SIZE):
-            if not is_dark_square(row, col):
+        for logical_col in range(BOARD_SIZE):
+            if not is_logical_playable_square(logical_row, logical_col, playable_color):
                 continue
 
-            logical_matrix[row][col] = 1
+            physical_row, physical_col = map_logical_to_physical(
+                logical_row,
+                logical_col,
+                rotation
+            )
 
-            physical_matrix = logical_to_physical_matrix(logical_matrix, rotation)
-            driver.write_matrix(physical_matrix)
+            print(
+                "  Adding logical square row=", logical_row,
+                "col=", logical_col,
+                "-> physical row=", physical_row,
+                "col=", physical_col
+            )
+
+            matrix[physical_row][physical_col] = 1
+            driver.write_matrix(matrix)
             sleep(delay_seconds)
 
         sleep(delay_seconds)
@@ -245,22 +230,28 @@ def run_row_fill_scan(driver, delay_seconds, rotation):
     driver.clear()
 
 
-def run_checkerboard_hold_test(driver, delay_seconds, rotation):
+def run_checkerboard_hold_test(driver, delay_seconds, rotation, playable_color):
     """
-    Turn on every logical playable square at once, then rotate it into
-    physical board orientation.
+    Turn on all logical playable squares at once.
     """
     print("Turning on all logical playable squares")
 
-    logical_matrix = empty_matrix()
+    matrix = empty_matrix()
 
-    for row in range(BOARD_SIZE):
-        for col in range(BOARD_SIZE):
-            if is_dark_square(row, col):
-                logical_matrix[row][col] = 1
+    for logical_row in range(BOARD_SIZE):
+        for logical_col in range(BOARD_SIZE):
+            if not is_logical_playable_square(logical_row, logical_col, playable_color):
+                continue
 
-    physical_matrix = logical_to_physical_matrix(logical_matrix, rotation)
-    driver.write_matrix(physical_matrix)
+            physical_row, physical_col = map_logical_to_physical(
+                logical_row,
+                logical_col,
+                rotation
+            )
+
+            matrix[physical_row][physical_col] = 1
+
+    driver.write_matrix(matrix)
     sleep(delay_seconds)
 
     print("Turning all LEDs off")
@@ -289,6 +280,12 @@ def build_argument_parser():
         help="How the physical board is rotated relative to logical software orientation"
     )
     parser.add_argument(
+        "--playable-color",
+        choices=["dark", "light"],
+        default="light",
+        help="Which logical parity should be treated as playable for this test"
+    )
+    parser.add_argument(
         "--mode",
         choices=["single", "row_fill", "checkerboard", "full"],
         default="full",
@@ -307,15 +304,45 @@ def main():
         driver.clear()
 
         if args.mode == "single":
-            run_single_led_scan(driver, args.delay, args.rotation)
+            run_single_led_scan(
+                driver,
+                args.delay,
+                args.rotation,
+                args.playable_color
+            )
         elif args.mode == "row_fill":
-            run_row_fill_scan(driver, args.delay, args.rotation)
+            run_row_fill_scan(
+                driver,
+                args.delay,
+                args.rotation,
+                args.playable_color
+            )
         elif args.mode == "checkerboard":
-            run_checkerboard_hold_test(driver, args.delay, args.rotation)
+            run_checkerboard_hold_test(
+                driver,
+                args.delay,
+                args.rotation,
+                args.playable_color
+            )
         elif args.mode == "full":
-            run_single_led_scan(driver, args.delay, args.rotation)
-            run_row_fill_scan(driver, args.delay, args.rotation)
-            run_checkerboard_hold_test(driver, args.delay, args.rotation)
+            run_single_led_scan(
+                driver,
+                args.delay,
+                args.rotation,
+                args.playable_color
+            )
+            run_row_fill_scan(
+                driver,
+                args.delay,
+                args.rotation,
+                args.playable_color
+            )
+            run_checkerboard_hold_test(
+                driver,
+                args.delay,
+                args.rotation,
+                args.playable_color
+            )
 
         print("LED rotation hardware test complete.")
 
