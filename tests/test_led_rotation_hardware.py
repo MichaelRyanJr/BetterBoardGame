@@ -36,25 +36,51 @@ DEFAULT_SPI_DEVICE = 0
 DEFAULT_SPI_SPEED_HZ = 1000000
 DEFAULT_BRIGHTNESS = 3
 
-# Current best-fit assumptions for your board
+# Confirmed board-level assumptions
 DEFAULT_ROTATION = "cw"
-DEFAULT_PLAYABLE_COLOR = "dark"
 
-# These two were the last working global corrections
-DEFAULT_ROW_OFFSET = 1
-DEFAULT_COL_OFFSET = -1
+# Canonical software checkers board still uses dark squares as playable
+DEFAULT_LOGICAL_PLAYABLE_COLOR = "dark"
 
-# New correction:
-# On odd physical rows, rotate the 4 playable LED positions by one slot.
-# This makes what used to be the "second" playable LED become the first.
-DEFAULT_ODD_ROW_PLAYABLE_SLOT_SHIFT = 1
+# After the 90 degree physical rotation, the physically populated LED parity flips
+DEFAULT_PHYSICAL_PLAYABLE_COLOR = "light"
+
+# Real row remap, not just test order:
+# what used to be row 1 now behaves like row 0, and old row 0 wraps to the end
+DEFAULT_PHYSICAL_ROW_REMAP = [1, 2, 3, 4, 5, 6, 7, 0]
+
+# Slot remap for the affected physical rows:
+# logical slot 0 -> physical slot 1
+# logical slot 1 -> physical slot 2
+# logical slot 2 -> physical slot 3
+# logical slot 3 -> physical slot 0
+DEFAULT_AFFECTED_ROW_SLOT_REMAP = [1, 2, 3, 0]
+
+# Rows not affected keep normal slot order
+DEFAULT_NORMAL_ROW_SLOT_REMAP = [0, 1, 2, 3]
+
+# Based on your latest observation, the affected rows are the odd physical rows
+DEFAULT_AFFECTED_ROW_PARITY = "odd"
 
 
 def is_dark_square(row, col):
     return (row + col) % 2 == 1
 
 
-def is_playable_square(row, col, playable_color):
+def row_matches_parity(row, parity_name):
+    if parity_name == "even":
+        return (row % 2) == 0
+
+    if parity_name == "odd":
+        return (row % 2) == 1
+
+    if parity_name == "none":
+        return False
+
+    raise ValueError("Unsupported parity name: " + str(parity_name))
+
+
+def is_playable_square_for_color(row, col, playable_color):
     if playable_color == "dark":
         return is_dark_square(row, col)
 
@@ -68,7 +94,7 @@ def get_playable_cols_for_row(row, playable_color):
     playable_cols = []
 
     for col in range(BOARD_SIZE):
-        if is_playable_square(row, col, playable_color):
+        if is_playable_square_for_color(row, col, playable_color):
             playable_cols.append(col)
 
     return playable_cols
@@ -98,11 +124,7 @@ def empty_matrix():
     return matrix
 
 
-def rotate_coordinate(row, col, rotation):
-    """
-    Convert one logical board coordinate into a rotated physical coordinate
-    before row/column wrap corrections are applied.
-    """
+def rotate_logical_to_raw_physical(row, col, rotation):
     if rotation == "none":
         return row, col
 
@@ -118,50 +140,59 @@ def rotate_coordinate(row, col, rotation):
     raise ValueError("Unsupported rotation: " + str(rotation))
 
 
+def choose_slot_remap_for_row(physical_row, affected_row_parity):
+    if row_matches_parity(physical_row, affected_row_parity):
+        return list(DEFAULT_AFFECTED_ROW_SLOT_REMAP)
+
+    return list(DEFAULT_NORMAL_ROW_SLOT_REMAP)
+
+
 def map_logical_to_physical(
     logical_row,
     logical_col,
     rotation,
-    playable_color,
-    row_offset,
-    col_offset,
-    odd_row_playable_slot_shift
+    logical_playable_color,
+    physical_playable_color,
+    physical_row_remap,
+    affected_row_parity
 ):
     """
-    Convert one logical coordinate into the actual physical LED position
+    Convert one canonical logical square into the actual physical LED position
     on the currently wired board.
 
     Steps:
-    1. rotate
-    2. apply full-row and full-column wrap offsets
-    3. on odd physical rows only, rotate the 4 playable LED slots by 1
+    1. Apply board rotation
+    2. Preserve the playable-slot index in the raw rotated row
+    3. Apply the physical row remap
+    4. On affected rows, remap the 4 playable slots as [1,2,3,0]
     """
-    physical_row, physical_col = rotate_coordinate(
+    raw_physical_row, raw_physical_col = rotate_logical_to_raw_physical(
         logical_row,
         logical_col,
         rotation
     )
 
-    physical_row = (physical_row + row_offset) % BOARD_SIZE
-    physical_col = (physical_col + col_offset) % BOARD_SIZE
+    raw_slot_index = get_playable_index_in_row(
+        raw_physical_row,
+        raw_physical_col,
+        physical_playable_color
+    )
 
-    if (physical_row % 2) == 1:
-        playable_index = get_playable_index_in_row(
-            physical_row,
-            physical_col,
-            playable_color
-        )
+    physical_row = physical_row_remap[raw_physical_row]
 
-        playable_index = (
-            playable_index + odd_row_playable_slot_shift
-        ) % 4
+    slot_remap = choose_slot_remap_for_row(
+        physical_row,
+        affected_row_parity
+    )
 
-        playable_cols = get_playable_cols_for_row(
-            physical_row,
-            playable_color
-        )
+    corrected_slot_index = slot_remap[raw_slot_index]
 
-        physical_col = playable_cols[playable_index]
+    playable_cols = get_playable_cols_for_row(
+        physical_row,
+        physical_playable_color
+    )
+
+    physical_col = playable_cols[corrected_slot_index]
 
     return physical_row, physical_col
 
@@ -245,10 +276,10 @@ def run_single_led_scan(
     driver,
     delay_seconds,
     rotation,
-    playable_color,
-    row_offset,
-    col_offset,
-    odd_row_playable_slot_shift
+    logical_playable_color,
+    physical_playable_color,
+    physical_row_remap,
+    affected_row_parity
 ):
     """
     Light one logical playable square at a time.
@@ -257,17 +288,21 @@ def run_single_led_scan(
         print("Testing logical row", logical_row)
 
         for logical_col in range(BOARD_SIZE):
-            if not is_playable_square(logical_row, logical_col, playable_color):
+            if not is_playable_square_for_color(
+                logical_row,
+                logical_col,
+                logical_playable_color
+            ):
                 continue
 
             physical_row, physical_col = map_logical_to_physical(
                 logical_row,
                 logical_col,
                 rotation,
-                playable_color,
-                row_offset,
-                col_offset,
-                odd_row_playable_slot_shift
+                logical_playable_color,
+                physical_playable_color,
+                physical_row_remap,
+                affected_row_parity
             )
 
             print(
@@ -290,10 +325,10 @@ def run_row_fill_scan(
     driver,
     delay_seconds,
     rotation,
-    playable_color,
-    row_offset,
-    col_offset,
-    odd_row_playable_slot_shift
+    logical_playable_color,
+    physical_playable_color,
+    physical_row_remap,
+    affected_row_parity
 ):
     """
     Fill each logical playable row from left to right.
@@ -304,17 +339,21 @@ def run_row_fill_scan(
         matrix = empty_matrix()
 
         for logical_col in range(BOARD_SIZE):
-            if not is_playable_square(logical_row, logical_col, playable_color):
+            if not is_playable_square_for_color(
+                logical_row,
+                logical_col,
+                logical_playable_color
+            ):
                 continue
 
             physical_row, physical_col = map_logical_to_physical(
                 logical_row,
                 logical_col,
                 rotation,
-                playable_color,
-                row_offset,
-                col_offset,
-                odd_row_playable_slot_shift
+                logical_playable_color,
+                physical_playable_color,
+                physical_row_remap,
+                affected_row_parity
             )
 
             print(
@@ -337,10 +376,10 @@ def run_checkerboard_hold_test(
     driver,
     delay_seconds,
     rotation,
-    playable_color,
-    row_offset,
-    col_offset,
-    odd_row_playable_slot_shift
+    logical_playable_color,
+    physical_playable_color,
+    physical_row_remap,
+    affected_row_parity
 ):
     """
     Turn on all logical playable squares at once.
@@ -351,17 +390,21 @@ def run_checkerboard_hold_test(
 
     for logical_row in range(BOARD_SIZE):
         for logical_col in range(BOARD_SIZE):
-            if not is_playable_square(logical_row, logical_col, playable_color):
+            if not is_playable_square_for_color(
+                logical_row,
+                logical_col,
+                logical_playable_color
+            ):
                 continue
 
             physical_row, physical_col = map_logical_to_physical(
                 logical_row,
                 logical_col,
                 rotation,
-                playable_color,
-                row_offset,
-                col_offset,
-                odd_row_playable_slot_shift
+                logical_playable_color,
+                physical_playable_color,
+                physical_row_remap,
+                affected_row_parity
             )
 
             matrix[physical_row][physical_col] = 1
@@ -372,6 +415,23 @@ def run_checkerboard_hold_test(
     print("Turning all LEDs off")
     driver.clear()
     sleep(delay_seconds)
+
+
+def parse_row_remap(text):
+    parts = text.split(",")
+
+    if len(parts) != BOARD_SIZE:
+        raise ValueError("row remap must contain exactly 8 comma-separated integers.")
+
+    row_remap = []
+
+    for part in parts:
+        row_remap.append(int(part.strip()))
+
+    if sorted(row_remap) != list(range(BOARD_SIZE)):
+        raise ValueError("row remap must be a permutation of 0 through 7.")
+
+    return row_remap
 
 
 def build_argument_parser():
@@ -395,28 +455,27 @@ def build_argument_parser():
         help="How the physical board is rotated relative to logical software orientation"
     )
     parser.add_argument(
-        "--playable-color",
+        "--logical-playable-color",
         choices=["dark", "light"],
-        default=DEFAULT_PLAYABLE_COLOR,
-        help="Which logical parity to walk during the test"
+        default=DEFAULT_LOGICAL_PLAYABLE_COLOR,
+        help="Canonical software playable parity"
     )
     parser.add_argument(
-        "--row-offset",
-        type=int,
-        default=DEFAULT_ROW_OFFSET,
-        help="Full wrap offset applied to physical rows after rotation"
+        "--physical-playable-color",
+        choices=["dark", "light"],
+        default=DEFAULT_PHYSICAL_PLAYABLE_COLOR,
+        help="Physically populated LED parity"
     )
     parser.add_argument(
-        "--col-offset",
-        type=int,
-        default=DEFAULT_COL_OFFSET,
-        help="Full wrap offset applied to physical columns after rotation"
+        "--physical-row-remap",
+        default="1,2,3,4,5,6,7,0",
+        help="Comma-separated row remap after rotation"
     )
     parser.add_argument(
-        "--odd-row-playable-slot-shift",
-        type=int,
-        default=DEFAULT_ODD_ROW_PLAYABLE_SLOT_SHIFT,
-        help="Playable-slot wrap applied only on odd physical rows"
+        "--affected-row-parity",
+        choices=["even", "odd", "none"],
+        default=DEFAULT_AFFECTED_ROW_PARITY,
+        help="Which physical row parity gets the [1,2,3,0] slot remap"
     )
     parser.add_argument(
         "--mode",
@@ -431,6 +490,8 @@ def main():
     parser = build_argument_parser()
     args = parser.parse_args()
 
+    physical_row_remap = parse_row_remap(args.physical_row_remap)
+
     driver = RawMAX7219(brightness=args.brightness)
 
     try:
@@ -441,58 +502,58 @@ def main():
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color,
-                args.row_offset,
-                args.col_offset,
-                args.odd_row_playable_slot_shift
+                args.logical_playable_color,
+                args.physical_playable_color,
+                physical_row_remap,
+                args.affected_row_parity
             )
         elif args.mode == "row_fill":
             run_row_fill_scan(
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color,
-                args.row_offset,
-                args.col_offset,
-                args.odd_row_playable_slot_shift
+                args.logical_playable_color,
+                args.physical_playable_color,
+                physical_row_remap,
+                args.affected_row_parity
             )
         elif args.mode == "checkerboard":
             run_checkerboard_hold_test(
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color,
-                args.row_offset,
-                args.col_offset,
-                args.odd_row_playable_slot_shift
+                args.logical_playable_color,
+                args.physical_playable_color,
+                physical_row_remap,
+                args.affected_row_parity
             )
         elif args.mode == "full":
             run_single_led_scan(
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color,
-                args.row_offset,
-                args.col_offset,
-                args.odd_row_playable_slot_shift
+                args.logical_playable_color,
+                args.physical_playable_color,
+                physical_row_remap,
+                args.affected_row_parity
             )
             run_row_fill_scan(
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color,
-                args.row_offset,
-                args.col_offset,
-                args.odd_row_playable_slot_shift
+                args.logical_playable_color,
+                args.physical_playable_color,
+                physical_row_remap,
+                args.affected_row_parity
             )
             run_checkerboard_hold_test(
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color,
-                args.row_offset,
-                args.col_offset,
-                args.odd_row_playable_slot_shift
+                args.logical_playable_color,
+                args.physical_playable_color,
+                physical_row_remap,
+                args.affected_row_parity
             )
 
         print("LED rotation hardware test complete.")
