@@ -15,7 +15,6 @@ from board.led_driver import LEDDriver
 
 DEFAULT_EVEN_ROW_SLOT_SHIFT = -1
 DEFAULT_ODD_ROW_SLOT_SHIFT = 0
-DEFAULT_ROW_SHIFT_AFTER_CW = 1
 
 
 def get_playable_cols_for_row(row):
@@ -38,13 +37,33 @@ def remap_playable_col_in_row(
     odd_row_slot_shift
 ):
     """
-    Apply the already-validated row-order correction.
+    Apply only the non-rotated per-row playable-slot correction.
 
-    - even rows: shift playable slots by -1
-    - odd rows: unchanged
+    Current understanding:
+    - even rows need a playable-slot shift of -1
+    - odd rows need no shift
+
+    This function does NOT rotate the board.
+    It only fixes the order of playable LEDs inside each row.
     """
+    if not is_dark_square(row, logical_col):
+        raise ValueError(
+            "logical_col must be a playable dark-square column for this row."
+        )
+
     playable_cols = get_playable_cols_for_row(row)
-    logical_index = playable_cols.index(logical_col)
+
+    logical_index = None
+
+    for index in range(len(playable_cols)):
+        if playable_cols[index] == logical_col:
+            logical_index = index
+            break
+
+    if logical_index is None:
+        raise ValueError(
+            "Could not find logical_col in the row's playable columns."
+        )
 
     if (row % 2) == 0:
         slot_shift = even_row_slot_shift
@@ -52,52 +71,31 @@ def remap_playable_col_in_row(
         slot_shift = odd_row_slot_shift
 
     mapped_index = (logical_index + slot_shift) % len(playable_cols)
-    return playable_cols[mapped_index]
+    mapped_col = playable_cols[mapped_index]
 
-
-def rotate_coordinate_cw(row, col):
-    """
-    Pure 90 degree clockwise rotation.
-
-    logical (row, col) -> rotated (col, 7 - row)
-    """
-    rotated_row = col
-    rotated_col = BOARD_SIZE - 1 - row
-    return rotated_row, rotated_col
+    return mapped_col
 
 
 def map_logical_to_physical(
     logical_row,
     logical_col,
-    row_shift_after_cw,
     even_row_slot_shift,
     odd_row_slot_shift
 ):
     """
-    Final test mapping:
-    1. rotate 90 degrees clockwise
-    2. shift rows so rotated squares land on playable/populated parity
-    3. apply the already-validated row-order correction
+    Map a logical square to the physical square for the baseline test.
+
+    For this version:
+    - row stays the same
+    - only the playable-column ordering inside the row is corrected
     """
-    rotated_row, rotated_col = rotate_coordinate_cw(
-        logical_row,
-        logical_col
-    )
+    if not is_dark_square(logical_row, logical_col):
+        raise ValueError("Only playable dark squares can be mapped.")
 
-    physical_row = (rotated_row + row_shift_after_cw) % BOARD_SIZE
-    physical_col = rotated_col
-
-    # After the row shift, the rotated square should now land on a playable tile.
-    if not is_dark_square(physical_row, physical_col):
-        raise ValueError(
-            "Mapped square landed on a non-playable tile: "
-            + "logical=(" + str(logical_row) + "," + str(logical_col) + ") "
-            + "-> physical=(" + str(physical_row) + "," + str(physical_col) + ")"
-        )
-
+    physical_row = logical_row
     physical_col = remap_playable_col_in_row(
-        physical_row,
-        physical_col,
+        logical_row,
+        logical_col,
         even_row_slot_shift,
         odd_row_slot_shift
     )
@@ -105,20 +103,21 @@ def map_logical_to_physical(
     return physical_row, physical_col
 
 
-def build_rotated_checkerboard_matrix(
-    row_shift_after_cw,
+def build_row_corrected_checkerboard_matrix(
     even_row_slot_shift,
     odd_row_slot_shift
 ):
     """
-    Build the full rotated/remapped checkerboard matrix.
+    Build a full 8x8 matrix using only the row-order correction.
     """
     matrix = []
 
     for _ in range(BOARD_SIZE):
         row = []
+
         for _ in range(BOARD_SIZE):
             row.append(False)
+
         matrix.append(row)
 
     for logical_row in range(BOARD_SIZE):
@@ -129,7 +128,6 @@ def build_rotated_checkerboard_matrix(
             physical_row, physical_col = map_logical_to_physical(
                 logical_row,
                 logical_col,
-                row_shift_after_cw,
                 even_row_slot_shift,
                 odd_row_slot_shift
             )
@@ -142,12 +140,14 @@ def build_rotated_checkerboard_matrix(
 def run_single_led_scan(
     driver,
     delay_seconds,
-    row_shift_after_cw,
     even_row_slot_shift,
     odd_row_slot_shift
 ):
     """
-    Light one logical playable square at a time after CW rotation.
+    Light one logical playable square at a time.
+
+    This is the best first test for checking whether the playable-square
+    order inside each row is correct.
     """
     for logical_row in range(BOARD_SIZE):
         print("Testing logical row", logical_row)
@@ -159,7 +159,6 @@ def run_single_led_scan(
             physical_row, physical_col = map_logical_to_physical(
                 logical_row,
                 logical_col,
-                row_shift_after_cw,
                 even_row_slot_shift,
                 odd_row_slot_shift
             )
@@ -181,12 +180,11 @@ def run_single_led_scan(
 def run_row_fill_scan(
     driver,
     delay_seconds,
-    row_shift_after_cw,
     even_row_slot_shift,
     odd_row_slot_shift
 ):
     """
-    Fill each logical row from left to right after CW rotation.
+    Fill each logical row from left to right using only row-order correction.
     """
     for logical_row in range(BOARD_SIZE):
         print("Filling logical playable squares in row", logical_row)
@@ -200,7 +198,6 @@ def run_row_fill_scan(
             physical_row, physical_col = map_logical_to_physical(
                 logical_row,
                 logical_col,
-                row_shift_after_cw,
                 even_row_slot_shift,
                 odd_row_slot_shift
             )
@@ -223,17 +220,15 @@ def run_row_fill_scan(
 def run_checkerboard_hold_test(
     driver,
     delay_seconds,
-    row_shift_after_cw,
     even_row_slot_shift,
     odd_row_slot_shift
 ):
     """
-    Turn on every rotated/remapped playable square at once.
+    Turn on every corrected playable square at once.
     """
-    print("Turning on all rotated playable squares")
+    print("Turning on all row-corrected playable squares")
 
-    matrix = build_rotated_checkerboard_matrix(
-        row_shift_after_cw,
+    matrix = build_row_corrected_checkerboard_matrix(
         even_row_slot_shift,
         odd_row_slot_shift
     )
@@ -259,12 +254,6 @@ def build_argument_parser():
         type=int,
         default=3,
         help="MAX7219 brightness from 0 to 15"
-    )
-    parser.add_argument(
-        "--row-shift-after-cw",
-        type=int,
-        default=DEFAULT_ROW_SHIFT_AFTER_CW,
-        help="Global row shift applied after CW rotation"
     )
     parser.add_argument(
         "--even-row-slot-shift",
@@ -303,7 +292,6 @@ def main():
             run_single_led_scan(
                 driver,
                 args.delay,
-                args.row_shift_after_cw,
                 args.even_row_slot_shift,
                 args.odd_row_slot_shift
             )
@@ -311,7 +299,6 @@ def main():
             run_row_fill_scan(
                 driver,
                 args.delay,
-                args.row_shift_after_cw,
                 args.even_row_slot_shift,
                 args.odd_row_slot_shift
             )
@@ -319,7 +306,6 @@ def main():
             run_checkerboard_hold_test(
                 driver,
                 args.delay,
-                args.row_shift_after_cw,
                 args.even_row_slot_shift,
                 args.odd_row_slot_shift
             )
@@ -327,26 +313,23 @@ def main():
             run_single_led_scan(
                 driver,
                 args.delay,
-                args.row_shift_after_cw,
                 args.even_row_slot_shift,
                 args.odd_row_slot_shift
             )
             run_row_fill_scan(
                 driver,
                 args.delay,
-                args.row_shift_after_cw,
                 args.even_row_slot_shift,
                 args.odd_row_slot_shift
             )
             run_checkerboard_hold_test(
                 driver,
                 args.delay,
-                args.row_shift_after_cw,
-                args.even_row-slot_shift,
+                args.even_row_slot_shift,
                 args.odd_row_slot_shift
             )
 
-        print("LED CW rotation hardware test complete.")
+        print("Baseline row-order LED hardware test complete.")
 
     finally:
         driver.shutdown()
