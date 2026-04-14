@@ -15,7 +15,7 @@ from board.led_driver import LEDDriver
 
 DEFAULT_EVEN_ROW_SLOT_SHIFT = -1
 DEFAULT_ODD_ROW_SLOT_SHIFT = 0
-DEFAULT_COL_SHIFT_AFTER_CW = 6
+DEFAULT_COL_SHIFT_AFTER_CW = 3
 
 
 def get_playable_cols_for_row(row):
