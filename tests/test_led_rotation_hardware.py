@@ -13,8 +13,8 @@ from shared.constants import BOARD_SIZE, is_dark_square
 from board.led_driver import LEDDriver
 
 
-DEFAULT_EVEN_ROW_SLOT_SHIFT = 1
-DEFAULT_ODD_ROW_SLOT_SHIFT = -1
+DEFAULT_EVEN_ROW_SLOT_SHIFT = -1
+DEFAULT_ODD_ROW_SLOT_SHIFT = 0
 
 
 def get_playable_cols_for_row(row):
@@ -39,13 +39,13 @@ def remap_playable_col_in_row(
     """
     Remap one playable square within its row.
 
-    Observed behavior:
-    - odd rows are already correct with the previous shift
-    - even rows are still one playable slot ahead
+    Current observed hardware behavior:
+    - odd rows already behave correctly
+    - even rows are one playable slot ahead
 
     So:
-    - even rows use +1 playable-slot shift
-    - odd rows use -1 playable-slot shift
+    - even rows use -1 playable-slot shift
+    - odd rows use 0 playable-slot shift
     """
     playable_cols = get_playable_cols_for_row(row)
     logical_index = playable_cols.index(logical_col)
