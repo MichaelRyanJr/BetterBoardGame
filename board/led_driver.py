@@ -27,6 +27,13 @@ DEFAULT_SPI_DEVICE = 0
 DEFAULT_SPI_SPEED_HZ = 1000000
 DEFAULT_BRIGHTNESS = 3
 
+# Confirmed LED remap values from the hardware test.
+DEFAULT_EVEN_ROW_SLOT_SHIFT = -1
+DEFAULT_ODD_ROW_SLOT_SHIFT = 0
+DEFAULT_COL_SHIFT_AFTER_CW = -1
+DEFAULT_EVEN_COL_SLOT_SHIFT = 1
+DEFAULT_ODD_COL_SLOT_SHIFT = 0
+
 
 def empty_led_matrix():
     """Build a blank 8x8 LED matrix."""
@@ -139,21 +146,271 @@ def build_hardware_safe_led_matrix(led_matrix):
     return safe_matrix
 
 
+def get_playable_cols_for_row(row):
+    """
+    Return the playable columns in left-to-right order for one row.
+    """
+    playable_cols = []
+
+    for col in range(BOARD_SIZE):
+        if is_dark_square(row, col):
+            playable_cols.append(col)
+
+    return playable_cols
+
+
+def remap_playable_col_in_row(
+    row,
+    logical_col,
+    even_row_slot_shift,
+    odd_row_slot_shift
+):
+    """
+    Apply the confirmed pre-rotation row-order correction.
+
+    Current understanding:
+    - even rows need a playable-slot shift of -1
+    - odd rows need no shift
+    """
+    if not is_dark_square(row, logical_col):
+        raise ValueError(
+            "logical_col must be a playable dark-square column for this row."
+        )
+
+    playable_cols = get_playable_cols_for_row(row)
+    logical_index = None
+
+    for index in range(len(playable_cols)):
+        if playable_cols[index] == logical_col:
+            logical_index = index
+            break
+
+    if logical_index is None:
+        raise ValueError(
+            "Could not find logical_col in the row's playable columns."
+        )
+
+    if (row % 2) == 0:
+        slot_shift = even_row_slot_shift
+    else:
+        slot_shift = odd_row_slot_shift
+
+    mapped_index = (logical_index + slot_shift) % len(playable_cols)
+    return playable_cols[mapped_index]
+
+
+def map_logical_to_baseline_physical(
+    logical_row,
+    logical_col,
+    even_row_slot_shift,
+    odd_row_slot_shift
+):
+    """
+    Apply only the known-good non-rotated mapping.
+
+    This is the mapping that fixed the playable-slot order inside each row
+    before the board rotation correction was added.
+    """
+    baseline_row = logical_row
+    baseline_col = remap_playable_col_in_row(
+        logical_row,
+        logical_col,
+        even_row_slot_shift,
+        odd_row_slot_shift
+    )
+
+    return baseline_row, baseline_col
+
+
+def rotate_coordinate_cw(row, col):
+    """
+    Apply a pure 90 degree clockwise rotation.
+
+    (row, col) -> (col, 7 - row)
+    """
+    rotated_row = col
+    rotated_col = BOARD_SIZE - 1 - row
+    return rotated_row, rotated_col
+
+
+def get_playable_rows_for_col(col):
+    """
+    Return the playable rows in top-to-bottom order for one column.
+    """
+    playable_rows = []
+
+    for row in range(BOARD_SIZE):
+        if is_dark_square(row, col):
+            playable_rows.append(row)
+
+    return playable_rows
+
+
+def remap_playable_row_in_col(
+    col,
+    logical_row,
+    even_col_slot_shift,
+    odd_col_slot_shift
+):
+    """
+    Apply the confirmed post-rotation column correction.
+
+    Current understanding:
+    - even columns need a playable-slot shift of +1
+    - odd columns need no shift
+    """
+    if not is_dark_square(logical_row, col):
+        raise ValueError(
+            "logical_row must be a playable dark-square row for this column."
+        )
+
+    playable_rows = get_playable_rows_for_col(col)
+    logical_index = None
+
+    for index in range(len(playable_rows)):
+        if playable_rows[index] == logical_row:
+            logical_index = index
+            break
+
+    if logical_index is None:
+        raise ValueError(
+            "Could not find logical_row in the column's playable rows."
+        )
+
+    if (col % 2) == 0:
+        slot_shift = even_col_slot_shift
+    else:
+        slot_shift = odd_col_slot_shift
+
+    mapped_index = (logical_index + slot_shift) % len(playable_rows)
+    return playable_rows[mapped_index]
+
+
+def map_logical_led_coordinate_to_physical(
+    logical_row,
+    logical_col,
+    col_shift_after_cw=DEFAULT_COL_SHIFT_AFTER_CW,
+    even_row_slot_shift=DEFAULT_EVEN_ROW_SLOT_SHIFT,
+    odd_row_slot_shift=DEFAULT_ODD_ROW_SLOT_SHIFT,
+    even_col_slot_shift=DEFAULT_EVEN_COL_SLOT_SHIFT,
+    odd_col_slot_shift=DEFAULT_ODD_COL_SLOT_SHIFT
+):
+    """
+    Map one logical LED coordinate onto the corrected physical board layout.
+
+    Order of operations:
+    1. apply the known-good baseline row-order correction
+    2. rotate 90 degrees clockwise
+    3. shift columns so the rotated board starts in the correct place
+    4. fix the remaining even-column wrap inside rotated columns
+
+    This keeps the rest of the codebase in clean logical board coordinates
+    while containing the physical board mistake inside the hardware layer.
+    """
+    if not is_dark_square(logical_row, logical_col):
+        raise ValueError("Only playable dark squares can be mapped.")
+
+    baseline_row, baseline_col = map_logical_to_baseline_physical(
+        logical_row,
+        logical_col,
+        even_row_slot_shift,
+        odd_row_slot_shift
+    )
+
+    rotated_row, rotated_col = rotate_coordinate_cw(
+        baseline_row,
+        baseline_col
+    )
+
+    physical_col = (rotated_col + col_shift_after_cw) % BOARD_SIZE
+    physical_row = rotated_row
+
+    if not is_dark_square(physical_row, physical_col):
+        raise ValueError(
+            "Mapped square landed on a non-playable tile before column correction: "
+            + "logical=(" + str(logical_row) + "," + str(logical_col) + ") "
+            + "-> baseline=(" + str(baseline_row) + "," + str(baseline_col) + ") "
+            + "-> shifted=(" + str(physical_row) + "," + str(physical_col) + ")"
+        )
+
+    physical_row = remap_playable_row_in_col(
+        physical_col,
+        physical_row,
+        even_col_slot_shift,
+        odd_col_slot_shift
+    )
+
+    if not is_dark_square(physical_row, physical_col):
+        raise ValueError(
+            "Final mapped square landed on a non-playable tile: "
+            + "logical=(" + str(logical_row) + "," + str(logical_col) + ") "
+            + "-> physical=(" + str(physical_row) + "," + str(physical_col) + ")"
+        )
+
+    return physical_row, physical_col
+
+
+def build_physical_led_matrix(
+    logical_led_matrix,
+    col_shift_after_cw=DEFAULT_COL_SHIFT_AFTER_CW,
+    even_row_slot_shift=DEFAULT_EVEN_ROW_SLOT_SHIFT,
+    odd_row_slot_shift=DEFAULT_ODD_ROW_SLOT_SHIFT,
+    even_col_slot_shift=DEFAULT_EVEN_COL_SLOT_SHIFT,
+    odd_col_slot_shift=DEFAULT_ODD_COL_SLOT_SHIFT
+):
+    """
+    Convert a logical LED matrix into the corrected physical LED matrix.
+
+    Input:
+    - logical board coordinates used everywhere else in the project
+
+    Output:
+    - physical board coordinates that match the real rotated/misaligned
+      hardware wiring
+    """
+    safe_logical_matrix = build_hardware_safe_led_matrix(logical_led_matrix)
+    physical_matrix = empty_led_matrix()
+
+    for logical_row in range(BOARD_SIZE):
+        for logical_col in range(BOARD_SIZE):
+            if not is_dark_square(logical_row, logical_col):
+                continue
+
+            physical_row, physical_col = map_logical_led_coordinate_to_physical(
+                logical_row,
+                logical_col,
+                col_shift_after_cw,
+                even_row_slot_shift,
+                odd_row_slot_shift,
+                even_col_slot_shift,
+                odd_col_slot_shift
+            )
+
+            physical_matrix[physical_row][physical_col] = safe_logical_matrix[logical_row][logical_col]
+
+    return physical_matrix
+
+
 class LEDDriver:
     """
     Control the 8x8 board LED output.
 
     mock mode:
-    - stores the current matrix only
+    - stores the current logical matrix only
 
     hardware mode:
-    - sends the matrix to a MAX7219 over SPI
+    - sends the logical matrix to a MAX7219 over SPI after applying the
+      confirmed physical board remap
 
-    Hardware mapping used here:
-    - software row 0 (top) -> DIG7
-    - software row 7 (bottom) -> DIG0
-    - software col 0 (left) -> SEG A
-    - software col 7 (right) -> SEG DP
+    Important:
+    - outside code still uses normal logical board coordinates
+    - the physical board mistake is corrected here inside the hardware layer
+
+    MAX7219 wiring assumptions:
+    - matrix row 0 (top) -> DIG7
+    - matrix row 7 (bottom) -> DIG0
+    - matrix col 0 (left) -> SEG A
+    - matrix col 7 (right) -> SEG DP
     """
 
     def __init__(
@@ -163,13 +420,24 @@ class LEDDriver:
         spi_bus=DEFAULT_SPI_BUS,
         spi_device=DEFAULT_SPI_DEVICE,
         spi_speed_hz=DEFAULT_SPI_SPEED_HZ,
-        brightness=DEFAULT_BRIGHTNESS
+        brightness=DEFAULT_BRIGHTNESS,
+        col_shift_after_cw=DEFAULT_COL_SHIFT_AFTER_CW,
+        even_row_slot_shift=DEFAULT_EVEN_ROW_SLOT_SHIFT,
+        odd_row_slot_shift=DEFAULT_ODD_ROW_SLOT_SHIFT,
+        even_col_slot_shift=DEFAULT_EVEN_COL_SLOT_SHIFT,
+        odd_col_slot_shift=DEFAULT_ODD_COL_SLOT_SHIFT
     ):
         self.mode = mode
         self.spi_bus = spi_bus
         self.spi_device = spi_device
         self.spi_speed_hz = int(spi_speed_hz)
         self.brightness = self._normalize_brightness(brightness)
+
+        self.col_shift_after_cw = int(col_shift_after_cw)
+        self.even_row_slot_shift = int(even_row_slot_shift)
+        self.odd_row_slot_shift = int(odd_row_slot_shift)
+        self.even_col_slot_shift = int(even_col_slot_shift)
+        self.odd_col_slot_shift = int(odd_col_slot_shift)
 
         self.spi = None
 
@@ -239,12 +507,12 @@ class LEDDriver:
         for register_address in range(MAX7219_REG_DIGIT0, MAX7219_REG_DIGIT7 + 1):
             self._write_register(register_address, 0)
 
-    def _software_row_to_digit_register(self, row):
+    def _matrix_row_to_digit_register(self, row):
         """
-        Convert a software row index into the correct MAX7219 digit register.
+        Convert a matrix row index into the correct MAX7219 digit register.
 
-        software row 0 -> DIG7 register
-        software row 7 -> DIG0 register
+        matrix row 0 -> DIG7 register
+        matrix row 7 -> DIG0 register
         """
         digit_index = (BOARD_SIZE - 1) - row
         return MAX7219_REG_DIGIT0 + digit_index
@@ -253,8 +521,8 @@ class LEDDriver:
         """
         Convert one 8-element LED row into the segment bit pattern.
 
-        Bit 0 -> SEG A  -> software col 0
-        Bit 7 -> SEG DP -> software col 7
+        Bit 0 -> SEG A  -> matrix col 0
+        Bit 7 -> SEG DP -> matrix col 7
         """
         row_value = 0
 
@@ -264,21 +532,42 @@ class LEDDriver:
 
         return row_value
 
-    def _write_led_matrix_to_hardware(self, led_matrix):
-        """Send the full 8x8 matrix to the MAX7219."""
-        safe_matrix = build_hardware_safe_led_matrix(led_matrix)
+    def _build_physical_led_matrix(self, logical_led_matrix):
+        """
+        Apply the confirmed physical board remap to a logical LED matrix.
+        """
+        return build_physical_led_matrix(
+            logical_led_matrix,
+            self.col_shift_after_cw,
+            self.even_row_slot_shift,
+            self.odd_row_slot_shift,
+            self.even_col_slot_shift,
+            self.odd_col_slot_shift
+        )
+
+    def _write_led_matrix_to_hardware(self, logical_led_matrix):
+        """
+        Send the logical 8x8 matrix to the MAX7219 after remapping it onto
+        the corrected physical board layout.
+        """
+        physical_matrix = self._build_physical_led_matrix(logical_led_matrix)
 
         for row in range(BOARD_SIZE):
-            register_address = self._software_row_to_digit_register(row)
-            row_value = self._build_row_byte(safe_matrix[row])
+            register_address = self._matrix_row_to_digit_register(row)
+            row_value = self._build_row_byte(physical_matrix[row])
             self._write_register(register_address, row_value)
 
     def _apply_mock_led_matrix(self, led_matrix):
-        """Store the LED matrix in mock mode."""
+        """Store the logical LED matrix in mock mode."""
         self.led_matrix = clone_led_matrix(led_matrix)
 
     def _apply_hardware_led_matrix(self, led_matrix):
-        """Send the LED matrix to the MAX7219."""
+        """
+        Send the logical LED matrix to the MAX7219.
+
+        self.led_matrix remains in logical board coordinates so the rest of the
+        software never has to know about the physical remap.
+        """
         safe_matrix = build_hardware_safe_led_matrix(led_matrix)
         self._write_led_matrix_to_hardware(safe_matrix)
         self.led_matrix = clone_led_matrix(safe_matrix)
@@ -297,13 +586,15 @@ class LEDDriver:
 
     def set_led_matrix(self, led_matrix):
         """
-        Replace the full 8x8 LED matrix.
+        Replace the full 8x8 logical LED matrix.
         """
         normalized_matrix = normalize_led_matrix(led_matrix)
         self._apply_led_matrix(normalized_matrix)
 
     def get_led_matrix(self):
-        """Return a copy of the currently displayed LED matrix."""
+        """
+        Return a copy of the currently displayed logical LED matrix.
+        """
         return clone_led_matrix(self.led_matrix)
 
     def clear(self):
@@ -319,7 +610,7 @@ class LEDDriver:
             self._write_register(MAX7219_REG_INTENSITY, self.brightness)
 
     def set_square(self, row, col, state):
-        """Set one LED square on or off."""
+        """Set one logical LED square on or off."""
         if row < 0 or row >= BOARD_SIZE:
             raise ValueError("row is outside the board.")
 
@@ -335,7 +626,7 @@ class LEDDriver:
         self.set_square(square.row, square.col, state)
 
     def set_squares(self, squares, state=LED_ON):
-        """Set multiple LED squares to the same state."""
+        """Set multiple logical LED squares to the same state."""
         updated_matrix = self.get_led_matrix()
         normalized_state = normalize_led_value(state)
 
