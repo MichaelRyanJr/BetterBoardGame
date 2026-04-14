@@ -1,3 +1,8 @@
+""" 
+DO NOT USE... this file was only to debug the wiring error we made and is no longer needed since
+it doesn't actually test anything to do with the runtime files, use test_led_driver_hardware.py instead
+"""
+
 import os
 import sys
 import argparse
