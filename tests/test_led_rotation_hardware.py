@@ -1,14 +1,13 @@
 import os
 import sys
+import argparse
+from time import sleep
 
 CURRENT_FILE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(CURRENT_FILE_DIR)
 
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-import argparse
-from time import sleep
 
 try:
     import spidev
@@ -37,6 +36,15 @@ DEFAULT_SPI_DEVICE = 0
 DEFAULT_SPI_SPEED_HZ = 1000000
 DEFAULT_BRIGHTNESS = 3
 
+# These defaults reflect the current best guess for your board:
+# - board is rotated 90 degrees clockwise relative to logical software orientation
+# - playable parity flips because of the 90 degree rotation
+# - there appears to be a row wrap offset and a column wrap offset
+DEFAULT_ROTATION = "cw"
+DEFAULT_PLAYABLE_COLOR = "light"
+DEFAULT_ROW_OFFSET = 1
+DEFAULT_COL_OFFSET = -1
+
 
 def is_dark_square(row, col):
     return (row + col) % 2 == 1
@@ -64,27 +72,46 @@ def empty_matrix():
     return matrix
 
 
-def map_logical_to_physical(row, col, rotation):
+def apply_wrap_offsets(row, col, row_offset, col_offset):
+    wrapped_row = (row + row_offset) % BOARD_SIZE
+    wrapped_col = (col + col_offset) % BOARD_SIZE
+    return wrapped_row, wrapped_col
+
+
+def map_logical_to_physical(row, col, rotation, row_offset, col_offset):
     """
     Convert one logical board coordinate into the physical coordinate
     currently wired on the MAX7219 board.
 
     rotation describes how the PHYSICAL board is rotated relative to
     the logical software orientation.
+
+    After the rotation, row_offset and col_offset are applied to correct
+    wrap/shift mistakes from the actual wiring.
     """
     if rotation == "none":
-        return row, col
+        physical_row = row
+        physical_col = col
+    elif rotation == "cw":
+        physical_row = col
+        physical_col = BOARD_SIZE - 1 - row
+    elif rotation == "ccw":
+        physical_row = BOARD_SIZE - 1 - col
+        physical_col = row
+    elif rotation == "180":
+        physical_row = BOARD_SIZE - 1 - row
+        physical_col = BOARD_SIZE - 1 - col
+    else:
+        raise ValueError("Unsupported rotation: " + str(rotation))
 
-    if rotation == "cw":
-        return col, BOARD_SIZE - 1 - row
+    physical_row, physical_col = apply_wrap_offsets(
+        physical_row,
+        physical_col,
+        row_offset,
+        col_offset
+    )
 
-    if rotation == "ccw":
-        return BOARD_SIZE - 1 - col, row
-
-    if rotation == "180":
-        return BOARD_SIZE - 1 - row, BOARD_SIZE - 1 - col
-
-    raise ValueError("Unsupported rotation: " + str(rotation))
+    return physical_row, physical_col
 
 
 class RawMAX7219:
@@ -162,7 +189,14 @@ class RawMAX7219:
             self.spi.close()
 
 
-def run_single_led_scan(driver, delay_seconds, rotation, playable_color):
+def run_single_led_scan(
+    driver,
+    delay_seconds,
+    rotation,
+    playable_color,
+    row_offset,
+    col_offset
+):
     """
     Light one logical playable square at a time.
     """
@@ -176,7 +210,9 @@ def run_single_led_scan(driver, delay_seconds, rotation, playable_color):
             physical_row, physical_col = map_logical_to_physical(
                 logical_row,
                 logical_col,
-                rotation
+                rotation,
+                row_offset,
+                col_offset
             )
 
             print(
@@ -195,7 +231,14 @@ def run_single_led_scan(driver, delay_seconds, rotation, playable_color):
     driver.clear()
 
 
-def run_row_fill_scan(driver, delay_seconds, rotation, playable_color):
+def run_row_fill_scan(
+    driver,
+    delay_seconds,
+    rotation,
+    playable_color,
+    row_offset,
+    col_offset
+):
     """
     Fill each logical playable row from left to right.
     """
@@ -211,7 +254,9 @@ def run_row_fill_scan(driver, delay_seconds, rotation, playable_color):
             physical_row, physical_col = map_logical_to_physical(
                 logical_row,
                 logical_col,
-                rotation
+                rotation,
+                row_offset,
+                col_offset
             )
 
             print(
@@ -230,7 +275,14 @@ def run_row_fill_scan(driver, delay_seconds, rotation, playable_color):
     driver.clear()
 
 
-def run_checkerboard_hold_test(driver, delay_seconds, rotation, playable_color):
+def run_checkerboard_hold_test(
+    driver,
+    delay_seconds,
+    rotation,
+    playable_color,
+    row_offset,
+    col_offset
+):
     """
     Turn on all logical playable squares at once.
     """
@@ -246,7 +298,9 @@ def run_checkerboard_hold_test(driver, delay_seconds, rotation, playable_color):
             physical_row, physical_col = map_logical_to_physical(
                 logical_row,
                 logical_col,
-                rotation
+                rotation,
+                row_offset,
+                col_offset
             )
 
             matrix[physical_row][physical_col] = 1
@@ -270,20 +324,32 @@ def build_argument_parser():
     parser.add_argument(
         "--brightness",
         type=int,
-        default=3,
+        default=DEFAULT_BRIGHTNESS,
         help="MAX7219 brightness from 0 to 15"
     )
     parser.add_argument(
         "--rotation",
         choices=["none", "cw", "ccw", "180"],
-        default="cw",
+        default=DEFAULT_ROTATION,
         help="How the physical board is rotated relative to logical software orientation"
     )
     parser.add_argument(
         "--playable-color",
         choices=["dark", "light"],
-        default="light",
+        default=DEFAULT_PLAYABLE_COLOR,
         help="Which logical parity should be treated as playable for this test"
+    )
+    parser.add_argument(
+        "--row-offset",
+        type=int,
+        default=DEFAULT_ROW_OFFSET,
+        help="Wrap offset applied to physical rows after rotation"
+    )
+    parser.add_argument(
+        "--col-offset",
+        type=int,
+        default=DEFAULT_COL_OFFSET,
+        help="Wrap offset applied to physical columns after rotation"
     )
     parser.add_argument(
         "--mode",
@@ -308,40 +374,52 @@ def main():
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color
+                args.playable_color,
+                args.row_offset,
+                args.col_offset
             )
         elif args.mode == "row_fill":
             run_row_fill_scan(
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color
+                args.playable_color,
+                args.row_offset,
+                args.col_offset
             )
         elif args.mode == "checkerboard":
             run_checkerboard_hold_test(
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color
+                args.playable_color,
+                args.row_offset,
+                args.col_offset
             )
         elif args.mode == "full":
             run_single_led_scan(
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color
+                args.playable_color,
+                args.row_offset,
+                args.col_offset
             )
             run_row_fill_scan(
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color
+                args.playable_color,
+                args.row_offset,
+                args.col_offset
             )
             run_checkerboard_hold_test(
                 driver,
                 args.delay,
                 args.rotation,
-                args.playable_color
+                args.playable_color,
+                args.row_offset,
+                args.col_offset
             )
 
         print("LED rotation hardware test complete.")
