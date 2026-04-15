@@ -5,7 +5,7 @@ from threading import Event, Lock, Thread
 
 from board.board_client import DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT
 from board.board_controller import BoardController
-from shared.constants import EventType
+from shared.constants import EventType, Player
 from shared.game_state import Coordinate, Move
 
 try:
@@ -26,17 +26,20 @@ class BoardMain:
     def __init__(
         self,
         board_id,
+        local_player=None,
         server_host=DEFAULT_SERVER_HOST,
         server_port=DEFAULT_SERVER_PORT,
         heartbeat_interval=DEFAULT_HEARTBEAT_INTERVAL
     ):
         self.board_id = board_id
+        self.local_player = local_player
         self.server_host = server_host
         self.server_port = server_port
         self.heartbeat_interval = heartbeat_interval
 
         self.controller = BoardController(
             board_id=board_id,
+            local_player=local_player,
             server_host=server_host,
             server_port=server_port,
             scanner_mode="gpio",
@@ -257,7 +260,10 @@ class BoardMain:
                     sent = self.send_json(json_text)
 
                     if sent:
-                        logging.debug("Scanner-generated message sent: %s", event_type.value)
+                        logging.debug(
+                            "Scanner-generated message sent: %s",
+                            event_type.value
+                        )
 
             except ConnectionClosed:
                 logging.info("Scan loop stopped because connection closed.")
@@ -284,7 +290,18 @@ class BoardMain:
     def run(self):
         """Connect to the server and keep the board runtime alive."""
         uri = self.build_server_uri()
-        logging.info("Connecting to %s as %s", uri, self.board_id)
+
+        if self.local_player is None:
+            player_text = "unset"
+        else:
+            player_text = self.local_player.value
+
+        logging.info(
+            "Connecting to %s as %s (local_player=%s)",
+            uri,
+            self.board_id,
+            player_text
+        )
 
         try:
             with connect(uri, open_timeout=10, ping_interval=20, ping_timeout=20) as websocket:
@@ -321,10 +338,27 @@ def default_board_id():
     return socket.gethostname().lower()
 
 
+def parse_local_player(player_text):
+    """
+    Convert the command-line local-player value into a Player enum.
+
+    Return None when the user does not provide a side.
+    """
+    if player_text is None:
+        return None
+
+    return Player(player_text)
+
+
 def build_argument_parser():
     """Create the command-line parser for the board runtime."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--board-id", default=default_board_id())
+    parser.add_argument(
+        "--local-player",
+        choices=[Player.RED.value, Player.BLACK.value],
+        default=None
+    )
     parser.add_argument("--server-host", default=DEFAULT_SERVER_HOST)
     parser.add_argument("--server-port", type=int, default=DEFAULT_SERVER_PORT)
     parser.add_argument(
@@ -347,8 +381,11 @@ def main():
         format="[%(levelname)s] %(message)s"
     )
 
+    local_player = parse_local_player(args.local_player)
+
     runtime = BoardMain(
         board_id=args.board_id,
+        local_player=local_player,
         server_host=args.server_host,
         server_port=args.server_port,
         heartbeat_interval=args.heartbeat_interval
