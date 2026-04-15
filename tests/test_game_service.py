@@ -14,8 +14,50 @@ from server.event_protocol import (
 )
 from server.game_service import GameService
 
-from shared.constants import ErrorCode, EventType, GameMode, Player, Winner
+from shared.constants import ErrorCode, EventType, GameMode, Player
 from shared.game_state import Coordinate, GameState, Move, Piece
+
+
+def empty_scan_matrix():
+    scan_matrix = []
+
+    for _ in range(8):
+        current_row = []
+
+        for _ in range(8):
+            current_row.append(False)
+
+        scan_matrix.append(current_row)
+
+    return scan_matrix
+
+
+def build_scan_from_squares(occupied_squares):
+    scan_matrix = empty_scan_matrix()
+
+    for row, col in occupied_squares:
+        scan_matrix[row][col] = True
+
+    return scan_matrix
+
+
+def build_scan_from_player_pieces(state, player):
+    scan_matrix = empty_scan_matrix()
+
+    for row in range(8):
+        for col in range(8):
+            square = Coordinate(row, col)
+            piece = state.piece_at(square)
+
+            if piece is None:
+                continue
+
+            if piece.owner != player:
+                continue
+
+            scan_matrix[row][col] = True
+
+    return scan_matrix
 
 
 class TestGameService(unittest.TestCase):
@@ -60,8 +102,6 @@ class TestGameService(unittest.TestCase):
 
         service = GameService(initial_state=state)
 
-        # This is illegal because it is a horizontal move.
-        # The destination is empty, so the validator reaches the direction check.
         move = Move(
             player=Player.BLACK,
             from_square=Coordinate(2, 1),
@@ -85,10 +125,11 @@ class TestGameService(unittest.TestCase):
         self.assertEqual(error_data["error_code"], ErrorCode.ILLEGAL_DIRECTION)
         self.assertEqual(error_data["message"], "Moves must be diagonal.")
 
-    def test_capture_move_returns_state_sync_and_piece_removed_required(self):
+    def test_capture_move_returns_state_sync_and_targeted_piece_removed_required(self):
         board = GameState.empty_board()
         board[2][1] = Piece(owner=Player.BLACK)
         board[3][2] = Piece(owner=Player.RED)
+        board[5][0] = Piece(owner=Player.RED)
 
         state = GameState(
             board=board,
@@ -123,8 +164,13 @@ class TestGameService(unittest.TestCase):
         updated_state = parse_state_sync_message(response_messages[0])
         squares_to_remove = parse_piece_removed_required_message(response_messages[1])
 
-        self.assertEqual(updated_state.winner, Winner.BLACK)
+        self.assertIsNone(updated_state.winner)
         self.assertEqual(squares_to_remove, [Coordinate(3, 2)])
+        self.assertEqual(response_messages[1]["target_board_id"], "bbg-boardb")
+        self.assertEqual(
+            service.pending_capture_removal_by_player[Player.RED],
+            [Coordinate(3, 2)]
+        )
 
     def test_heartbeat_returns_heartbeat_message(self):
         service = GameService()
@@ -141,17 +187,9 @@ class TestGameService(unittest.TestCase):
         self.assertEqual(response_messages[0]["event_type"], EventType.HEARTBEAT.value)
         self.assertEqual(response_messages[0]["payload"]["status"], "ok")
 
-    def test_scan_snapshot_is_stored(self):
+    def test_scan_snapshot_is_stored_per_source(self):
         service = GameService()
-
-        scan_matrix = []
-        for row in range(8):
-            current_row = []
-            for col in range(8):
-                current_row.append(False)
-            scan_matrix.append(current_row)
-
-        scan_matrix[2][1] = True
+        scan_matrix = build_scan_from_squares([(2, 1)])
 
         message = build_scan_snapshot_message(
             scan_matrix=scan_matrix,
@@ -165,21 +203,25 @@ class TestGameService(unittest.TestCase):
         self.assertEqual(response_messages, [])
         self.assertIsNotNone(service.last_scan_snapshot)
         self.assertTrue(service.last_scan_snapshot[2][1])
+        self.assertIn("bbg-boarda", service.last_scan_snapshot_by_source)
+        self.assertTrue(service.last_scan_snapshot_by_source["bbg-boarda"][2][1])
 
-    def test_stable_scan_is_stored(self):
-        service = GameService()
+    def test_stable_scan_matching_canonical_state_returns_no_messages(self):
+        board = GameState.empty_board()
+        board[2][1] = Piece(owner=Player.BLACK)
+        board[5][0] = Piece(owner=Player.RED)
 
-        scan_matrix = []
-        for row in range(8):
-            current_row = []
-            for col in range(8):
-                current_row.append(False)
-            scan_matrix.append(current_row)
+        state = GameState(
+            board=board,
+            current_player=Player.BLACK,
+            mode=GameMode.MULTIPLAYER
+        )
 
-        scan_matrix[5][0] = True
+        service = GameService(initial_state=state)
+        stable_scan = build_scan_from_player_pieces(service.state, Player.BLACK)
 
         message = build_stable_scan_message(
-            scan_matrix=scan_matrix,
+            scan_matrix=stable_scan,
             game_id=service.state.game_id,
             session_id=service.state.session_id,
             source="BBG-BoardA"
@@ -189,7 +231,144 @@ class TestGameService(unittest.TestCase):
 
         self.assertEqual(response_messages, [])
         self.assertIsNotNone(service.last_stable_scan)
-        self.assertTrue(service.last_stable_scan[5][0])
+        self.assertIn("bbg-boarda", service.last_stable_scan_by_source)
+
+    def test_stable_scan_can_infer_one_legal_move_and_return_state_sync(self):
+        board = GameState.empty_board()
+        board[2][1] = Piece(owner=Player.BLACK)
+        board[5][0] = Piece(owner=Player.RED)
+
+        state = GameState(
+            board=board,
+            current_player=Player.BLACK,
+            mode=GameMode.MULTIPLAYER
+        )
+
+        service = GameService(initial_state=state)
+        inferred_post_move_scan = build_scan_from_squares([(3, 0)])
+
+        message = build_stable_scan_message(
+            scan_matrix=inferred_post_move_scan,
+            game_id=service.state.game_id,
+            session_id=service.state.session_id,
+            source="BBG-BoardA"
+        )
+
+        response_messages = service.handle_incoming_message(message)
+
+        self.assertEqual(len(response_messages), 1)
+        self.assertEqual(response_messages[0]["event_type"], EventType.STATE_SYNC.value)
+
+        updated_state = parse_state_sync_message(response_messages[0])
+        self.assertIsNone(updated_state.piece_at(Coordinate(2, 1)))
+        self.assertIsNotNone(updated_state.piece_at(Coordinate(3, 0)))
+        self.assertEqual(updated_state.current_player, Player.RED)
+
+    def test_stable_scan_from_unknown_source_returns_error_and_state_sync(self):
+        service = GameService()
+        stable_scan = build_scan_from_squares([(2, 1)])
+
+        message = build_stable_scan_message(
+            scan_matrix=stable_scan,
+            game_id=service.state.game_id,
+            session_id=service.state.session_id,
+            source="BBG-UnknownBoard"
+        )
+
+        response_messages = service.handle_incoming_message(message)
+
+        self.assertEqual(len(response_messages), 2)
+        self.assertEqual(response_messages[0]["event_type"], EventType.ERROR.value)
+        self.assertEqual(response_messages[1]["event_type"], EventType.STATE_SYNC.value)
+
+        error_data = parse_error_message(response_messages[0])
+        self.assertEqual(error_data["error_code"], ErrorCode.SERVER_REJECTED_STATE)
+
+    def test_stable_scan_change_on_out_of_turn_board_returns_error_and_state_sync(self):
+        board = GameState.empty_board()
+        board[2][1] = Piece(owner=Player.BLACK)
+        board[5][0] = Piece(owner=Player.RED)
+
+        state = GameState(
+            board=board,
+            current_player=Player.BLACK,
+            mode=GameMode.MULTIPLAYER
+        )
+
+        service = GameService(initial_state=state)
+        changed_red_scan = build_scan_from_squares([(4, 1)])
+
+        message = build_stable_scan_message(
+            scan_matrix=changed_red_scan,
+            game_id=service.state.game_id,
+            session_id=service.state.session_id,
+            source="BBG-BoardB"
+        )
+
+        response_messages = service.handle_incoming_message(message)
+
+        self.assertEqual(len(response_messages), 2)
+        self.assertEqual(response_messages[0]["event_type"], EventType.ERROR.value)
+        self.assertEqual(response_messages[1]["event_type"], EventType.STATE_SYNC.value)
+
+        error_data = parse_error_message(response_messages[0])
+        self.assertEqual(error_data["error_code"], ErrorCode.OUT_OF_TURN)
+
+    def test_pending_capture_removal_returns_no_messages_until_square_is_cleared(self):
+        board = GameState.empty_board()
+        board[4][3] = Piece(owner=Player.BLACK)
+        board[5][0] = Piece(owner=Player.RED)
+
+        state = GameState(
+            board=board,
+            current_player=Player.RED,
+            mode=GameMode.MULTIPLAYER
+        )
+
+        service = GameService(initial_state=state)
+        service.pending_capture_removal_by_player[Player.RED] = [Coordinate(3, 2)]
+
+        incomplete_scan = build_scan_from_squares([(3, 2), (5, 0)])
+
+        message = build_stable_scan_message(
+            scan_matrix=incomplete_scan,
+            game_id=service.state.game_id,
+            session_id=service.state.session_id,
+            source="BBG-BoardB"
+        )
+
+        response_messages = service.handle_incoming_message(message)
+
+        self.assertEqual(response_messages, [])
+        self.assertIn(Player.RED, service.pending_capture_removal_by_player)
+
+    def test_pending_capture_removal_clears_when_required_square_becomes_empty(self):
+        board = GameState.empty_board()
+        board[4][3] = Piece(owner=Player.BLACK)
+        board[5][0] = Piece(owner=Player.RED)
+
+        state = GameState(
+            board=board,
+            current_player=Player.RED,
+            mode=GameMode.MULTIPLAYER
+        )
+
+        service = GameService(initial_state=state)
+        service.pending_capture_removal_by_player[Player.RED] = [Coordinate(3, 2)]
+
+        complete_scan = build_scan_from_player_pieces(service.state, Player.RED)
+
+        message = build_stable_scan_message(
+            scan_matrix=complete_scan,
+            game_id=service.state.game_id,
+            session_id=service.state.session_id,
+            source="BBG-BoardB"
+        )
+
+        response_messages = service.handle_incoming_message(message)
+
+        self.assertEqual(response_messages, [])
+        self.assertNotIn(Player.RED, service.pending_capture_removal_by_player)
 
     def test_desync_detected_returns_state_sync(self):
         service = GameService()
