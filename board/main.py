@@ -21,25 +21,58 @@ except ImportError as exc:
 DEFAULT_HEARTBEAT_INTERVAL = 15.0
 DEFAULT_SCAN_INTERVAL = 1.0
 
+# Map each Raspberry Pi board name to its permanent player side.
+# If you want the opposite assignment, swap these two values.
+BOARD_PLAYER_BY_ID = {
+    "bbg-boarda": Player.BLACK,
+    "bbg-boardb": Player.RED,
+}
+
+
+def normalize_board_id(board_id):
+    """
+    Normalize a board identifier so comparisons stay consistent.
+
+    The Raspberry Pi hostnames are treated case-insensitively here.
+    """
+    if board_id is None:
+        return None
+
+    return str(board_id).strip().lower()
+
+
+def get_local_player_from_board_id(board_id):
+    """
+    Return the player side assigned to this board name.
+
+    Known board names:
+    - BBG-BoardA
+    - BBG-BoardB
+
+    Any unknown board name returns None so the runtime can still start,
+    but LED behavior that depends on local_player will remain unset.
+    """
+    normalized_board_id = normalize_board_id(board_id)
+    return BOARD_PLAYER_BY_ID.get(normalized_board_id)
+
 
 class BoardMain:
     def __init__(
         self,
         board_id,
-        local_player=None,
         server_host=DEFAULT_SERVER_HOST,
         server_port=DEFAULT_SERVER_PORT,
         heartbeat_interval=DEFAULT_HEARTBEAT_INTERVAL
     ):
         self.board_id = board_id
-        self.local_player = local_player
+        self.local_player = get_local_player_from_board_id(board_id)
         self.server_host = server_host
         self.server_port = server_port
         self.heartbeat_interval = heartbeat_interval
 
         self.controller = BoardController(
             board_id=board_id,
-            local_player=local_player,
+            local_player=self.local_player,
             server_host=server_host,
             server_port=server_port,
             scanner_mode="gpio",
@@ -260,10 +293,7 @@ class BoardMain:
                     sent = self.send_json(json_text)
 
                     if sent:
-                        logging.debug(
-                            "Scanner-generated message sent: %s",
-                            event_type.value
-                        )
+                        logging.debug("Scanner-generated message sent: %s", event_type.value)
 
             except ConnectionClosed:
                 logging.info("Scan loop stopped because connection closed.")
@@ -292,7 +322,12 @@ class BoardMain:
         uri = self.build_server_uri()
 
         if self.local_player is None:
-            player_text = "unset"
+            logging.warning(
+                "Board ID '%s' does not match a known player mapping. "
+                "Known board names are BBG-BoardA and BBG-BoardB.",
+                self.board_id
+            )
+            player_text = "unknown"
         else:
             player_text = self.local_player.value
 
@@ -338,27 +373,10 @@ def default_board_id():
     return socket.gethostname().lower()
 
 
-def parse_local_player(player_text):
-    """
-    Convert the command-line local-player value into a Player enum.
-
-    Return None when the user does not provide a side.
-    """
-    if player_text is None:
-        return None
-
-    return Player(player_text)
-
-
 def build_argument_parser():
     """Create the command-line parser for the board runtime."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--board-id", default=default_board_id())
-    parser.add_argument(
-        "--local-player",
-        choices=[Player.RED.value, Player.BLACK.value],
-        default=None
-    )
     parser.add_argument("--server-host", default=DEFAULT_SERVER_HOST)
     parser.add_argument("--server-port", type=int, default=DEFAULT_SERVER_PORT)
     parser.add_argument(
@@ -381,11 +399,8 @@ def main():
         format="[%(levelname)s] %(message)s"
     )
 
-    local_player = parse_local_player(args.local_player)
-
     runtime = BoardMain(
         board_id=args.board_id,
-        local_player=local_player,
         server_host=args.server_host,
         server_port=args.server_port,
         heartbeat_interval=args.heartbeat_interval
