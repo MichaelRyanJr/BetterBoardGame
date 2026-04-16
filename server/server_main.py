@@ -5,15 +5,6 @@ from threading import Lock
 from shared.constants import EventType
 from server.game_service import GameService
 
-try:
-    from websockets.exceptions import ConnectionClosed
-    from websockets.sync.server import serve
-except ImportError as exc:
-    raise ImportError(
-        "This file requires the 'websockets' package. "
-        "Install it with: pip install -U websockets"
-    ) from exc
-
 
 DEFAULT_BIND_HOST = "0.0.0.0"
 DEFAULT_SERVER_PORT = 8765
@@ -315,6 +306,14 @@ class ServerMain:
 
     def handle_connection(self, websocket):
         """Handle the full lifetime of one board connection."""
+        try:
+            from websockets.exceptions import ConnectionClosed
+        except ImportError as exc:
+            raise ImportError(
+                "This file requires the 'websockets' package. "
+                "Install it with: pip install -U websockets"
+            ) from exc
+
         self.register_connection(websocket)
         logging.info(
             "Client connected. Active connections: %s",
@@ -341,6 +340,14 @@ class ServerMain:
 
     def run(self):
         """Start the WebSocket server and keep it running."""
+        try:
+            from websockets.sync.server import serve
+        except ImportError as exc:
+            raise ImportError(
+                "This file requires the 'websockets' package. "
+                "Install it with: pip install -U websockets"
+            ) from exc
+
         logging.info(
             "Starting Better Board Game server on ws://%s:%s",
             self.host,
