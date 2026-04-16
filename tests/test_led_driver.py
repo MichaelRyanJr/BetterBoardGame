@@ -273,17 +273,9 @@ class TestLedDriver(unittest.TestCase):
         with self.assertRaises(ValueError):
             driver.display_capture_removal_squares([Coordinate(2, BOARD_SIZE)])
 
-    def test_hardware_mode_not_implemented_yet(self):
-        driver = LEDDriver(mode="hardware")
-
-        with self.assertRaises(NotImplementedError):
-            driver.set_led_matrix(empty_led_matrix())
-
     def test_invalid_mode_raises_value_error(self):
-        driver = LEDDriver(mode="invalid-mode")
-
         with self.assertRaises(ValueError):
-            driver.set_led_matrix(empty_led_matrix())
+            LEDDriver(mode="invalid-mode")
 
 
 if __name__ == "__main__":
