@@ -12,6 +12,18 @@ from shared.game_state import Coordinate, Move
 DEFAULT_HEARTBEAT_INTERVAL = 15.0
 DEFAULT_SCAN_INTERVAL = 1.0
 
+
+class WebSocketConnectionClosedFallback(Exception):
+    """
+    Fallback exception used when the websockets package is not installed.
+
+    This lets unit tests run board loop methods without importing the real
+    websockets package. In real runtime use, the real ConnectionClosed class
+    is imported instead.
+    """
+    pass
+
+
 # Map each Raspberry Pi board name to its permanent player side.
 # If you want the opposite assignment, swap these two values.
 BOARD_PLAYER_BY_ID = {
@@ -20,15 +32,25 @@ BOARD_PLAYER_BY_ID = {
 }
 
 
-def get_websocket_runtime():
+def get_connection_closed_exception():
     """
-    Import the WebSocket runtime only when it is actually needed.
+    Return the exception class used for closed WebSocket connections.
 
-    This keeps unit tests lightweight because they can import this file
-    without requiring the websockets package to be installed.
+    During unit tests, websockets may not be installed. In that case we return
+    a local fallback exception type so the loop code can still run.
     """
     try:
         from websockets.exceptions import ConnectionClosed
+        return ConnectionClosed
+    except ImportError:
+        return WebSocketConnectionClosedFallback
+
+
+def get_websocket_connect():
+    """
+    Import the WebSocket connect function only when the live runtime needs it.
+    """
+    try:
         from websockets.sync.client import connect
     except ImportError as exc:
         raise ImportError(
@@ -36,7 +58,7 @@ def get_websocket_runtime():
             "Install it with: pip install -U websockets"
         ) from exc
 
-    return ConnectionClosed, connect
+    return connect
 
 
 def normalize_board_id(board_id):
@@ -255,7 +277,7 @@ class BoardMain:
         if self.heartbeat_interval <= 0:
             return
 
-        ConnectionClosed, _ = get_websocket_runtime()
+        connection_closed_exception = get_connection_closed_exception()
 
         while not self.stop_event.wait(self.heartbeat_interval):
             try:
@@ -263,7 +285,7 @@ class BoardMain:
 
                 if sent:
                     logging.debug("Heartbeat sent.")
-            except ConnectionClosed:
+            except connection_closed_exception:
                 logging.info("Heartbeat loop stopped because connection closed.")
                 return
             except Exception:
@@ -275,7 +297,7 @@ class BoardMain:
         if self.scan_interval <= 0:
             return
 
-        ConnectionClosed, _ = get_websocket_runtime()
+        connection_closed_exception = get_connection_closed_exception()
 
         while not self.stop_event.wait(self.scan_interval):
             try:
@@ -307,9 +329,12 @@ class BoardMain:
                     sent = self.send_json(json_text)
 
                     if sent:
-                        logging.debug("Scanner-generated message sent: %s", event_type.value)
+                        logging.debug(
+                            "Scanner-generated message sent: %s",
+                            event_type.value
+                        )
 
-            except ConnectionClosed:
+            except connection_closed_exception:
                 logging.info("Scan loop stopped because connection closed.")
                 return
             except Exception:
@@ -333,7 +358,8 @@ class BoardMain:
 
     def run(self):
         """Connect to the server and keep the board runtime alive."""
-        ConnectionClosed, connect = get_websocket_runtime()
+        connection_closed_exception = get_connection_closed_exception()
+        connect = get_websocket_connect()
         uri = self.build_server_uri()
 
         if self.local_player is None:
@@ -374,7 +400,7 @@ class BoardMain:
 
         except KeyboardInterrupt:
             logging.info("Board runtime stopped by user.")
-        except ConnectionClosed:
+        except connection_closed_exception:
             logging.info("Server connection closed.")
         finally:
             self.stop_event.set()
