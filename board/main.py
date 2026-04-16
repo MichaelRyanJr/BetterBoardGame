@@ -8,15 +8,6 @@ from board.board_controller import BoardController
 from shared.constants import EventType, Player
 from shared.game_state import Coordinate, Move
 
-try:
-    from websockets.exceptions import ConnectionClosed
-    from websockets.sync.client import connect
-except ImportError as exc:
-    raise ImportError(
-        "This file requires the 'websockets' package. "
-        "Install it with: pip install -U websockets"
-    ) from exc
-
 
 DEFAULT_HEARTBEAT_INTERVAL = 15.0
 DEFAULT_SCAN_INTERVAL = 1.0
@@ -27,6 +18,25 @@ BOARD_PLAYER_BY_ID = {
     "bbg-boarda": Player.BLACK,
     "bbg-boardb": Player.RED,
 }
+
+
+def get_websocket_runtime():
+    """
+    Import the WebSocket runtime only when it is actually needed.
+
+    This keeps unit tests lightweight because they can import this file
+    without requiring the websockets package to be installed.
+    """
+    try:
+        from websockets.exceptions import ConnectionClosed
+        from websockets.sync.client import connect
+    except ImportError as exc:
+        raise ImportError(
+            "This file requires the 'websockets' package when running the live board runtime. "
+            "Install it with: pip install -U websockets"
+        ) from exc
+
+    return ConnectionClosed, connect
 
 
 def normalize_board_id(board_id):
@@ -245,6 +255,8 @@ class BoardMain:
         if self.heartbeat_interval <= 0:
             return
 
+        ConnectionClosed, _ = get_websocket_runtime()
+
         while not self.stop_event.wait(self.heartbeat_interval):
             try:
                 sent = self.send_heartbeat()
@@ -262,6 +274,8 @@ class BoardMain:
         """Read scanner updates through the controller and send scan messages."""
         if self.scan_interval <= 0:
             return
+
+        ConnectionClosed, _ = get_websocket_runtime()
 
         while not self.stop_event.wait(self.scan_interval):
             try:
@@ -319,6 +333,7 @@ class BoardMain:
 
     def run(self):
         """Connect to the server and keep the board runtime alive."""
+        ConnectionClosed, connect = get_websocket_runtime()
         uri = self.build_server_uri()
 
         if self.local_player is None:
