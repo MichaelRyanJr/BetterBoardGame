@@ -1,4 +1,5 @@
 import os
+import socket
 import time
 import unittest
 
@@ -9,23 +10,63 @@ from shared.move_validation import legal_moves_for_player
 
 try:
     from websockets.sync.client import connect
-except ImportError as exc:
-    raise ImportError(
-        "This test requires the 'websockets' package. "
-        "Install it in your virtual environment first."
-    ) from exc
+except ImportError:
+    connect = None
 
 
 RESPONSE_TIMEOUT_SECONDS = 5.0
 LATENCY_LIMIT_MS = 2000.0
 
 
+def live_transport_tests_enabled():
+    """
+    Return True only when the user explicitly enables live transport tests.
+
+    This keeps the default unit test suite fast and predictable while still
+    allowing the live transport test to be run on demand.
+    """
+    value = os.environ.get("BBG_RUN_LIVE_TRANSPORT_TESTS", "0")
+    return value == "1"
+
+
+def can_reach_server(host, port, timeout_seconds=1.0):
+    """
+    Return True if a TCP connection to the live server can be opened.
+    """
+    test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    test_socket.settimeout(timeout_seconds)
+
+    try:
+        test_socket.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        test_socket.close()
+
+
+@unittest.skipUnless(connect is not None, "websockets is not installed")
+@unittest.skipUnless(
+    live_transport_tests_enabled(),
+    "Set BBG_RUN_LIVE_TRANSPORT_TESTS=1 to run live transport tests"
+)
 class LiveTransportTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.server_host = os.environ.get("BBG_SERVER_HOST", DEFAULT_SERVER_HOST)
         cls.server_port = int(os.environ.get("BBG_SERVER_PORT", DEFAULT_SERVER_PORT))
-        cls.board_id = os.environ.get("BBG_TEST_BOARD_ID", "bbg-live-test")
+
+        # Default to a real mapped board identity so the server can interpret it
+        # consistently with the hostname-based multiplayer setup.
+        cls.board_id = os.environ.get("BBG_TEST_BOARD_ID", "BBG-BoardA")
+
+        if not can_reach_server(cls.server_host, cls.server_port):
+            raise unittest.SkipTest(
+                "Live server is not reachable at "
+                + cls.server_host
+                + ":"
+                + str(cls.server_port)
+            )
 
     def setUp(self):
         self.client = BoardClient(
@@ -70,6 +111,7 @@ class LiveTransportTestCase(unittest.TestCase):
 
             if remaining_time <= 0:
                 expected_names = []
+
                 for event_type in expected_event_types:
                     expected_names.append(event_type.value)
 
@@ -111,6 +153,7 @@ class LiveTransportTestCase(unittest.TestCase):
             selected_action = candidate_actions[0]
 
         captured_squares = []
+
         for square in selected_action.captured_squares:
             captured_squares.append(Coordinate(square.row, square.col))
 
@@ -137,6 +180,7 @@ class LiveTransportTestCase(unittest.TestCase):
         selected_action = candidate_actions[0]
 
         captured_squares = []
+
         for square in selected_action.captured_squares:
             captured_squares.append(Coordinate(square.row, square.col))
 
