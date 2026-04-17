@@ -113,12 +113,16 @@ class TestSinglePlayerRuntime(unittest.TestCase):
     def test_capture_removal_complete_clears_pending_squares(self):
         runtime = build_runtime(human_player=Player.BLACK)
 
+        # Make the canonical state consistent with a previously captured human piece.
+        state_after_capture = runtime.get_state()
+        state_after_capture.set_piece(Coordinate(2, 1), None)
+        runtime.state_cache.set_state(state_after_capture)
+
         runtime.pending_human_piece_removal_squares = [Coordinate(2, 1)]
         runtime.refresh_led_display()
 
         current_state = runtime.get_state()
         expected_scan = runtime.build_expected_scan_for_human(current_state)
-        expected_scan[2][1] = False
 
         result = runtime.handle_stable_scan(expected_scan)
 
