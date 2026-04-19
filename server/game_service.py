@@ -282,6 +282,29 @@ class GameService:
 
         return [error_message, state_sync_message]
 
+    def merge_pending_capture_removals(self, player, new_squares):
+        """
+        Merge newly captured squares into the existing pending-removal list.
+
+        This matters for multi-capture turns. If the capturing player takes more
+        than one jump before the opponent has physically removed the earlier
+        captured pieces, the server must keep prompting for the full outstanding
+        set instead of only the most recent capture.
+        """
+        merged_squares = []
+        existing_squares = self.pending_capture_removal_by_player.get(player, [])
+
+        for square in existing_squares:
+            if square not in merged_squares:
+                merged_squares.append(square)
+
+        for square in new_squares:
+            if square not in merged_squares:
+                merged_squares.append(square)
+
+        self.pending_capture_removal_by_player[player] = merged_squares
+        return list(merged_squares)
+
     def build_post_move_messages(self, applied_move):
         """
         Build the server responses after one legal move is successfully applied.
@@ -290,7 +313,8 @@ class GameService:
 
         If the move captured pieces, this also:
         - records which player must physically remove pieces
-        - builds a piece_removed_required message
+        - accumulates all still-pending captured squares for that board
+        - builds a piece_removed_required message for the full outstanding set
         - attaches target_board_id so the next server layer can route it
           to the correct board instead of broadcasting it
         """
@@ -302,12 +326,13 @@ class GameService:
         captured_player = applied_move.move.player.get_opponent()
         captured_board_id = self.get_source_for_player(captured_player)
 
-        self.pending_capture_removal_by_player[captured_player] = list(
+        outstanding_squares = self.merge_pending_capture_removals(
+            captured_player,
             applied_move.captured_squares
         )
 
         piece_removed_message = build_piece_removed_required_message(
-            squares_to_remove=applied_move.captured_squares,
+            squares_to_remove=outstanding_squares,
             game_id=self.state.game_id,
             session_id=self.state.session_id,
             source=self.server_id
