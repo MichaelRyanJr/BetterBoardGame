@@ -19,12 +19,17 @@ To run singleplayer:
 
   simply run the following commands with the wanted difficulty:
 
+For Easy:
 
     cd ~/BetterBoardGame
     python3 run_single_player.py --difficulty easy
 
+For Medium:
+
     cd ~/BetterBoardGame
     python3 run_single_player.py --difficulty medium
+
+For Hard:
 
     cd ~/BetterBoardGame
     python3 run_single_player.py --difficulty hard
