@@ -10,7 +10,7 @@ from shared.game_state import Coordinate, Move
 
 
 DEFAULT_HEARTBEAT_INTERVAL = 15.0
-DEFAULT_SCAN_INTERVAL = 1.0
+DEFAULT_SCAN_INTERVAL = 0.05
 
 
 class WebSocketConnectionClosedFallback(Exception):
