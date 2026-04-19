@@ -17,7 +17,14 @@ To run multiplayer mode:
 
 To run singleplayer:
 
-  simply run the following commands:
-  
+  simply run the following commands with the wanted difficulty:
+
+
     cd ~/BetterBoardGame
-    python3 run_single_player.py
+    python3 run_single_player.py --difficulty easy
+
+    cd ~/BetterBoardGame
+    python3 run_single_player.py --difficulty medium
+
+    cd ~/BetterBoardGame
+    python3 run_single_player.py --difficulty hard
