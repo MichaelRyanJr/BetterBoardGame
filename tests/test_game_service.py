@@ -172,6 +172,72 @@ class TestGameService(unittest.TestCase):
             [Coordinate(3, 2)]
         )
 
+    def test_multi_capture_accumulates_pending_piece_removals(self):
+        board = GameState.empty_board()
+        board[2][1] = Piece(owner=Player.BLACK)
+        board[3][2] = Piece(owner=Player.RED)
+        board[5][4] = Piece(owner=Player.RED)
+        board[7][0] = Piece(owner=Player.RED)
+
+        state = GameState(
+            board=board,
+            current_player=Player.BLACK,
+            mode=GameMode.MULTIPLAYER
+        )
+
+        service = GameService(initial_state=state)
+
+        first_move = Move(
+            player=Player.BLACK,
+            from_square=Coordinate(2, 1),
+            to_square=Coordinate(4, 3)
+        )
+
+        first_message = build_candidate_move_message(
+            move=first_move,
+            game_id=service.state.game_id,
+            session_id=service.state.session_id,
+            source="BBG-BoardA"
+        )
+
+        first_response_messages = service.handle_incoming_message(first_message)
+        first_squares_to_remove = parse_piece_removed_required_message(
+            first_response_messages[1]
+        )
+
+        self.assertEqual(first_squares_to_remove, [Coordinate(3, 2)])
+        self.assertEqual(
+            service.pending_capture_removal_by_player[Player.RED],
+            [Coordinate(3, 2)]
+        )
+
+        second_move = Move(
+            player=Player.BLACK,
+            from_square=Coordinate(4, 3),
+            to_square=Coordinate(6, 5)
+        )
+
+        second_message = build_candidate_move_message(
+            move=second_move,
+            game_id=service.state.game_id,
+            session_id=service.state.session_id,
+            source="BBG-BoardA"
+        )
+
+        second_response_messages = service.handle_incoming_message(second_message)
+        second_squares_to_remove = parse_piece_removed_required_message(
+            second_response_messages[1]
+        )
+
+        self.assertEqual(
+            second_squares_to_remove,
+            [Coordinate(3, 2), Coordinate(5, 4)]
+        )
+        self.assertEqual(
+            service.pending_capture_removal_by_player[Player.RED],
+            [Coordinate(3, 2), Coordinate(5, 4)]
+        )
+
     def test_heartbeat_returns_heartbeat_message(self):
         service = GameService()
 
