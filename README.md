@@ -4,11 +4,13 @@ A physical checkers board capable of online multiplayer and single player vs an 
 
 To run multiplayer mode:
 
-  1st: on the serevr open the terminal and run
+  1st: on the server open the terminal and run
+  
     cd ~/BetterBoardGame
     python3 -m server.server_main
 
   2nd: on both boards run the following commands
+  
     cd ~/BetterBoardGame
     python3 -m board.main
 
@@ -16,5 +18,6 @@ To run multiplayer mode:
 To run singleplayer:
 
   simply run the following commands:
+  
     cd ~/BetterBoardGame
     python3 run_single_player.py
