@@ -54,6 +54,10 @@ class GameService:
         # player's board after a capture.
         self.pending_capture_removal_by_player = {}
 
+        # Track the full capture replay path that should be shown on the captured
+        # player's board while waiting for physical piece removal.
+        self.pending_capture_replay_by_player = {}
+
     def get_state(self):
         # Return a clone so outside code does not modify the real server state.
         return self.state.clone()
@@ -72,6 +76,7 @@ class GameService:
         self.last_scan_snapshot_by_source = {}
         self.last_stable_scan_by_source = {}
         self.pending_capture_removal_by_player = {}
+        self.pending_capture_replay_by_player = {}
 
     def encode_message(self, message):
         # Convert one message dictionary into JSON text.
@@ -305,6 +310,41 @@ class GameService:
         self.pending_capture_removal_by_player[player] = merged_squares
         return list(merged_squares)
 
+    def merge_pending_capture_replay(self, player, applied_move):
+        """
+        Merge one newly applied capture segment into the replay path that should
+        be shown on the captured player's board.
+
+        For a normal single capture this becomes: [from_square, to_square]
+
+        For a multi-jump chain this becomes something like:
+            [start_square, landing_after_jump_1, landing_after_jump_2, ...]
+        """
+        merged_squares = []
+        existing_squares = self.pending_capture_replay_by_player.get(player, [])
+
+        for square in existing_squares:
+            if square not in merged_squares:
+                merged_squares.append(square)
+
+        if len(merged_squares) == 0:
+            merged_squares.append(applied_move.move.from_square)
+
+        destination_square = applied_move.move.to_square
+
+        if len(merged_squares) == 0:
+            merged_squares.append(destination_square)
+        else:
+            previous_square = merged_squares[len(merged_squares) - 1]
+
+            if previous_square.row != destination_square.row:
+                merged_squares.append(destination_square)
+            elif previous_square.col != destination_square.col:
+                merged_squares.append(destination_square)
+
+        self.pending_capture_replay_by_player[player] = merged_squares
+        return list(merged_squares)
+
     def build_post_move_messages(self, applied_move):
         """
         Build the server responses after one legal move is successfully applied.
@@ -330,9 +370,14 @@ class GameService:
             captured_player,
             applied_move.captured_squares
         )
+        replay_squares = self.merge_pending_capture_replay(
+            captured_player,
+            applied_move
+        )
 
         piece_removed_message = build_piece_removed_required_message(
             squares_to_remove=outstanding_squares,
+            replay_squares=replay_squares,
             game_id=self.state.game_id,
             session_id=self.state.session_id,
             source=self.server_id
@@ -435,6 +480,9 @@ class GameService:
         if pending_squares is not None:
             if self.required_removal_is_complete(scan_matrix, pending_squares):
                 del self.pending_capture_removal_by_player[player]
+
+                if player in self.pending_capture_replay_by_player:
+                    del self.pending_capture_replay_by_player[player]
 
                 expected_scan = self.build_expected_scan_for_player(self.state, player)
 
