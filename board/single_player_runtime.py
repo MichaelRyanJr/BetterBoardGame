@@ -16,8 +16,10 @@ from shared.move_validation import legal_moves_for_player
 from shared.rules import apply_move
 
 
-DEFAULT_CAPTURE_REPLAY_STEP_SECONDS = 0.35
+DEFAULT_CAPTURE_REPLAY_STEP_SECONDS = 0.5
+DEFAULT_CAPTURE_REMOVAL_BLINK_STEP_SECONDS = 0.5
 DEFAULT_ILLEGAL_BLINK_STEP_SECONDS = 0.35
+DEFAULT_AI_KING_BLINK_STEP_SECONDS = 0.18
 
 
 class SinglePlayerRuntime:
@@ -45,7 +47,9 @@ class SinglePlayerRuntime:
         scanner_stable_reads_required=2,
         led_mode="hardware",
         capture_replay_step_seconds=DEFAULT_CAPTURE_REPLAY_STEP_SECONDS,
-        illegal_blink_step_seconds=DEFAULT_ILLEGAL_BLINK_STEP_SECONDS
+        capture_removal_blink_step_seconds=DEFAULT_CAPTURE_REMOVAL_BLINK_STEP_SECONDS,
+        illegal_blink_step_seconds=DEFAULT_ILLEGAL_BLINK_STEP_SECONDS,
+        ai_king_blink_step_seconds=DEFAULT_AI_KING_BLINK_STEP_SECONDS
     ):
         self.human_player = human_player
         self.ai_player = human_player.get_opponent()
@@ -74,9 +78,12 @@ class SinglePlayerRuntime:
         self.pending_ai_capture_replay_squares = []
         self.pending_illegal_return_square = None
         self.capture_replay_step_seconds = float(capture_replay_step_seconds)
+        self.capture_removal_blink_step_seconds = float(capture_removal_blink_step_seconds)
         self.illegal_blink_step_seconds = float(illegal_blink_step_seconds)
+        self.ai_king_blink_step_seconds = float(ai_king_blink_step_seconds)
         self.capture_replay_started_at = None
         self.illegal_blink_started_at = None
+        self.king_blink_started_at = time.monotonic()
         self.last_error_code = None
         self.last_message = ""
 
@@ -174,6 +181,53 @@ class SinglePlayerRuntime:
                 continue
 
             led_matrix[square.row][square.col] = LED_ON
+
+        return led_matrix
+
+    def get_ai_king_squares(self, state):
+        king_squares = []
+
+        if state is None:
+            return king_squares
+
+        for row in range(8):
+            for col in range(8):
+                piece = state.board[row][col]
+
+                if piece is None:
+                    continue
+
+                if piece.owner != self.ai_player:
+                    continue
+
+                if not piece.is_king:
+                    continue
+
+                king_squares.append(Coordinate(row, col))
+
+        return king_squares
+
+    def has_blinking_ai_king(self):
+        state = self.get_state()
+        return len(self.get_ai_king_squares(state)) > 0
+
+    def build_ai_led_matrix_with_blinking_kings(self, state):
+        led_matrix = build_opponent_led_matrix(state, self.human_player)
+        king_squares = self.get_ai_king_squares(state)
+
+        if len(king_squares) == 0:
+            return led_matrix
+
+        blink_is_on = self.get_blink_phase_is_on(
+            self.king_blink_started_at,
+            self.ai_king_blink_step_seconds
+        )
+
+        for square in king_squares:
+            if blink_is_on:
+                led_matrix[square.row][square.col] = LED_ON
+            else:
+                led_matrix[square.row][square.col] = 0
 
         return led_matrix
 
@@ -330,7 +384,7 @@ class SinglePlayerRuntime:
                 self.led_driver.clear()
                 return
 
-            base_led_matrix = build_opponent_led_matrix(state, self.human_player)
+            base_led_matrix = self.build_ai_led_matrix_with_blinking_kings(state)
 
             if len(self.pending_ai_capture_replay_squares) > 0:
                 if self.capture_replay_started_at is None:
@@ -342,16 +396,34 @@ class SinglePlayerRuntime:
                     self.capture_replay_step_seconds
                 )
 
-                led_matrix = self.build_led_matrix_with_highlighted_squares(
-                    base_led_matrix,
-                    [replay_square]
-                )
-                self.led_driver.set_led_matrix(led_matrix)
+                # Hide the entire replay path from the steady AI display while
+                # waiting for the human to remove the captured piece. This keeps
+                # the AI piece's final landing square from appearing solid before
+                # the replay cue has served its purpose.
+                for replay_path_square in self.pending_ai_capture_replay_squares:
+                    if replay_path_square is None:
+                        continue
+
+                    base_led_matrix[replay_path_square.row][replay_path_square.col] = False
+
+                if replay_square is not None:
+                    base_led_matrix[replay_square.row][replay_square.col] = LED_ON
+
+                self.led_driver.set_led_matrix(base_led_matrix)
                 return
 
-            self.led_driver.display_capture_removal_squares(
-                self.pending_human_piece_removal_squares
+            removal_blink_is_on = self.get_blink_phase_is_on(
+                self.capture_replay_started_at,
+                self.capture_removal_blink_step_seconds
             )
+
+            if removal_blink_is_on:
+                self.led_driver.display_capture_removal_squares(
+                    self.pending_human_piece_removal_squares
+                )
+            else:
+                self.led_driver.clear()
+
             return
 
         self.capture_replay_started_at = None
@@ -364,7 +436,7 @@ class SinglePlayerRuntime:
             if self.illegal_blink_started_at is None:
                 self.illegal_blink_started_at = time.monotonic()
 
-            base_led_matrix = build_opponent_led_matrix(state, self.human_player)
+            base_led_matrix = self.build_ai_led_matrix_with_blinking_kings(state)
             blink_is_on = self.get_blink_phase_is_on(
                 self.illegal_blink_started_at,
                 self.illegal_blink_step_seconds
@@ -387,7 +459,8 @@ class SinglePlayerRuntime:
             self.led_driver.clear()
             return
 
-        self.led_driver.display_opponent_pieces(state, self.human_player)
+        led_matrix = self.build_ai_led_matrix_with_blinking_kings(state)
+        self.led_driver.set_led_matrix(led_matrix)
 
     def read_scan_matrix(self):
         """Read one raw logical scan from the board scanner."""
@@ -421,7 +494,11 @@ class SinglePlayerRuntime:
         """
         Read the scanner once and process the scan only if it is stable.
         """
-        if self.has_pending_human_piece_removal() or self.has_pending_illegal_return_square():
+        if (
+            self.has_pending_human_piece_removal()
+            or self.has_pending_illegal_return_square()
+            or self.has_blinking_ai_king()
+        ):
             self.refresh_led_display()
 
         stable_scan = self.read_stable_scan_matrix()
