@@ -19,7 +19,8 @@ from shared.rules import apply_move
 DEFAULT_CAPTURE_REPLAY_STEP_SECONDS = 0.5
 DEFAULT_CAPTURE_REMOVAL_BLINK_STEP_SECONDS = 0.5
 DEFAULT_ILLEGAL_BLINK_STEP_SECONDS = 0.35
-DEFAULT_AI_KING_BLINK_STEP_SECONDS = 0.05
+DEFAULT_AI_KING_BLINK_STEP_SECONDS = 0.18
+DEFAULT_AI_RESPONSE_DELAY_SECONDS = 0.75
 
 
 class SinglePlayerRuntime:
@@ -49,7 +50,8 @@ class SinglePlayerRuntime:
         capture_replay_step_seconds=DEFAULT_CAPTURE_REPLAY_STEP_SECONDS,
         capture_removal_blink_step_seconds=DEFAULT_CAPTURE_REMOVAL_BLINK_STEP_SECONDS,
         illegal_blink_step_seconds=DEFAULT_ILLEGAL_BLINK_STEP_SECONDS,
-        ai_king_blink_step_seconds=DEFAULT_AI_KING_BLINK_STEP_SECONDS
+        ai_king_blink_step_seconds=DEFAULT_AI_KING_BLINK_STEP_SECONDS,
+        ai_response_delay_seconds=DEFAULT_AI_RESPONSE_DELAY_SECONDS
     ):
         self.human_player = human_player
         self.ai_player = human_player.get_opponent()
@@ -81,6 +83,7 @@ class SinglePlayerRuntime:
         self.capture_removal_blink_step_seconds = float(capture_removal_blink_step_seconds)
         self.illegal_blink_step_seconds = float(illegal_blink_step_seconds)
         self.ai_king_blink_step_seconds = float(ai_king_blink_step_seconds)
+        self.ai_response_delay_seconds = float(ai_response_delay_seconds)
         self.capture_replay_started_at = None
         self.illegal_blink_started_at = None
         self.king_blink_started_at = time.monotonic()
@@ -868,6 +871,9 @@ class SinglePlayerRuntime:
                 )
 
             if updated_state.current_player == self.ai_player:
+                if self.ai_response_delay_seconds > 0:
+                    time.sleep(self.ai_response_delay_seconds)
+
                 ai_result = self._apply_ai_turn()
                 return self.build_status_result(
                     "human_and_ai_turn_complete",
