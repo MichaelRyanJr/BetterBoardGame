@@ -89,6 +89,30 @@ def message_from_json(json_text):
     """
     return json_to_dict(json_text)
 
+def serialize_coordinate_list(squares):
+    """
+    Convert a list of Coordinate objects into plain dictionaries.
+    """
+    serialized_squares = []
+
+    for square in squares:
+        serialized_squares.append(coordinate_to_dict(square))
+
+    return serialized_squares
+
+
+def parse_coordinate_list(square_data_list):
+    """
+    Convert a list of coordinate dictionaries back into Coordinate objects.
+    """
+    squares = []
+
+    for square_data in square_data_list:
+        squares.append(coordinate_from_dict(square_data))
+
+    return squares
+
+
 
 def build_scan_snapshot_message(scan_matrix, game_id=None, session_id=None, source=None):
     """
@@ -319,6 +343,7 @@ def parse_desync_detected_message(message):
 
 def build_piece_removed_required_message(
     squares_to_remove,
+    replay_squares=None,
     game_id=None,
     session_id=None,
     source=None
@@ -330,13 +355,12 @@ def build_piece_removed_required_message(
     to be taken off the board by the player.
     """
 
-    serialized_squares = []
-
-    for square in squares_to_remove:
-        serialized_squares.append(coordinate_to_dict(square))
+    if replay_squares is None:
+        replay_squares = []
 
     payload = {
-        "squares_to_remove": serialized_squares
+        "squares_to_remove": serialize_coordinate_list(squares_to_remove),
+        "replay_squares": serialize_coordinate_list(replay_squares)
     }
 
     return build_message(
@@ -351,15 +375,33 @@ def build_piece_removed_required_message(
 def parse_piece_removed_required_message(message):
     """
     Extract the list of squares that still need to be physically cleared.
+
+    This older helper is preserved for compatibility with code that only
+    cares about removal squares.
     """
 
     square_data_list = message["payload"].get("squares_to_remove", [])
-    squares = []
+    return parse_coordinate_list(square_data_list)
 
-    for square_data in square_data_list:
-        squares.append(coordinate_from_dict(square_data))
 
-    return squares
+def parse_piece_removed_required_replay_squares_message(message):
+    """
+    Extract the replay path squares attached to a piece_removed_required message.
+    """
+
+    square_data_list = message["payload"].get("replay_squares", [])
+    return parse_coordinate_list(square_data_list)
+
+
+def parse_piece_removed_required_details_message(message):
+    """
+    Read the full piece_removed_required payload.
+    """
+
+    return {
+        "squares_to_remove": parse_piece_removed_required_message(message),
+        "replay_squares": parse_piece_removed_required_replay_squares_message(message)
+    }
 
 
 def build_illegal_state_detected_message(
