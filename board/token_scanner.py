@@ -12,7 +12,20 @@ except ImportError:
 DEFAULT_COLUMN_PINS = [4, 17, 27, 22, 5, 6, 13, 19]
 
 # Rows are listed top to bottom on the real hardware.
-DEFAULT_ROW_PINS = [21, 20, 16, 12, 25, 24, 23, 18]
+# Updated after real scanner validation:
+# physical row mapping was observed as:
+# 0 -> 6
+# 1 -> 5
+# 2 -> 4
+# 3 -> 3
+# 4 -> 2
+# 5 -> 1
+# 6 -> 0
+# 7 -> 7
+#
+# That means the first seven row wires were effectively reversed relative to
+# the schematic, while the last row was already correct.
+DEFAULT_ROW_PINS = [23, 24, 25, 12, 16, 20, 21, 18]
 
 DEFAULT_SETTLE_DELAY_SECONDS = 0.0005
 
