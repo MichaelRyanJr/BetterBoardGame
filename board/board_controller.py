@@ -82,15 +82,8 @@ class BoardController:
         self.latest_stable_scan_matrix = None
         self.last_stable_scan_sent = None
 
-        # These are squares where the server says a captured piece still needs
-        # to be physically removed from the board.
         self.pending_capture_removal_squares = []
-
-        # Replay the opponent move path while waiting for captured-piece removal.
         self.pending_opponent_capture_replay_squares = []
-
-        # Blink all local piece squares that must be restored after an illegal
-        # physical move. These are guidance-only and do not affect protocol.
         self.pending_illegal_return_squares = []
 
         self.capture_replay_step_seconds = float(capture_replay_step_seconds)
@@ -403,15 +396,6 @@ class BoardController:
     def update_illegal_move_guidance_from_scan(self, scan_matrix):
         """
         Decide whether the stable local scan should show illegal-move guidance.
-
-        Rules:
-        - no guidance while waiting for captured-piece removal
-        - no guidance without a canonical state or local-player assignment
-        - no guidance if the scan already matches the canonical local occupancy
-        - no guidance if the scan matches at least one legal local move from the
-          current canonical state, because that move may simply be waiting for
-          server validation/sync
-        - otherwise blink every missing expected local-piece square
         """
         if self.has_pending_capture_removal():
             self.pending_illegal_return_squares = []
@@ -458,72 +442,13 @@ class BoardController:
         else:
             self.illegal_blink_started_at = None
 
-    def infer_opponent_capture_replay_squares(self, previous_state, new_state):
-        """
-        Infer a simple opponent move replay path from one canonical state update.
-
-        Without extra protocol metadata we can reliably infer the opponent's
-        start and end squares, but not every intermediate landing square of a
-        multi-jump. Returning [from_square, to_square] still gives the local
-        player a clear cue while waiting to remove a captured piece.
-        """
-        replay_squares = []
-
-        if previous_state is None or new_state is None:
-            return replay_squares
-
-        if self.local_player is None:
-            return replay_squares
-
-        opponent = self.local_player.get_opponent()
-
-        old_local_count = previous_state.count_pieces(self.local_player)
-        new_local_count = new_state.count_pieces(self.local_player)
-
-        if new_local_count >= old_local_count:
-            return replay_squares
-
-        moved_from_squares = []
-        moved_to_squares = []
-
-        for row in range(8):
-            for col in range(8):
-                old_piece = previous_state.board[row][col]
-                new_piece = new_state.board[row][col]
-
-                old_is_opponent = old_piece is not None and old_piece.owner == opponent
-                new_is_opponent = new_piece is not None and new_piece.owner == opponent
-
-                if old_is_opponent and not new_is_opponent:
-                    moved_from_squares.append(Coordinate(row, col))
-
-                if new_is_opponent and not old_is_opponent:
-                    moved_to_squares.append(Coordinate(row, col))
-
-        if len(moved_from_squares) != 1:
-            return replay_squares
-
-        if len(moved_to_squares) != 1:
-            return replay_squares
-
-        replay_squares.append(moved_from_squares[0])
-
-        destination_square = moved_to_squares[0]
-        if (
-            replay_squares[0].row != destination_square.row
-            or replay_squares[0].col != destination_square.col
-        ):
-            replay_squares.append(destination_square)
-
-        return replay_squares
-
     def refresh_led_display(self):
         """
         Update the LEDs based on the current board-side situation.
 
         Priority:
-        1. if the opponent just captured, replay the opponent move path until
-           the local captured piece is physically removed
+        1. if the opponent just captured, replay the authoritative capture path
+           until the local captured piece is physically removed
         2. if the local player made an illegal physical move, blink every square
            where a local piece must be restored
         3. otherwise show the opponent's current positions, with opponent kings
@@ -614,9 +539,6 @@ class BoardController:
     def read_scan_matrix(self):
         """
         Read one raw scan from the scanner.
-
-        This updates the controller's stored latest scan and also checks
-        whether a pending capture-removal requirement has now been satisfied.
         """
         scan_matrix = self.scanner.read_scan_matrix()
         self.latest_raw_scan_matrix = clone_scan_matrix(scan_matrix)
@@ -648,11 +570,6 @@ class BoardController:
     def poll_scanner_and_build_outgoing_messages(self):
         """
         Read the scanner and build any outbound protocol messages.
-
-        Current behavior:
-        - always build one scan_snapshot
-        - build stable_scan only when a new stable matrix appears
-        - keep LED blink states animating during the polling loop
         """
         if (
             self.has_pending_capture_removal()
@@ -701,30 +618,19 @@ class BoardController:
         """
         Process one incoming protocol message and update board output.
         """
-        previous_state = self.client.get_state()
         result = self.client.handle_incoming_message(message)
         event_type = result["event_type"]
 
         if event_type == EventType.STATE_SYNC:
-            state_updated = result.get("state_updated", False)
-
-            if state_updated:
-                new_state = self.client.get_state()
-                replay_squares = self.infer_opponent_capture_replay_squares(
-                    previous_state,
-                    new_state
-                )
-
-                self.pending_opponent_capture_replay_squares = replay_squares
-                if len(replay_squares) > 0:
-                    self.capture_replay_started_at = time.monotonic()
-
             self.refresh_led_display()
             return result
 
         if event_type == EventType.PIECE_REMOVED_REQUIRED:
             squares_to_remove = result.get("squares_to_remove", [])
+            replay_squares = result.get("replay_squares", [])
+
             self.pending_capture_removal_squares = list(squares_to_remove)
+            self.pending_opponent_capture_replay_squares = list(replay_squares)
 
             if len(self.pending_capture_removal_squares) > 0:
                 if self.capture_replay_started_at is None:
