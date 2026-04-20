@@ -22,14 +22,14 @@ To run singleplayer:
 For Easy:
 
     cd ~/BetterBoardGame
-    python3 run_single_player.py --difficulty easy
+    python3 board/run_single_player.py --difficulty easy
 
 For Medium:
 
     cd ~/BetterBoardGame
-    python3 run_single_player.py --difficulty medium
+    python3 board/run_single_player.py --difficulty medium
 
 For Hard:
 
     cd ~/BetterBoardGame
-    python3 run_single_player.py --difficulty hard
+    python3 board/run_single_player.py --difficulty hard
