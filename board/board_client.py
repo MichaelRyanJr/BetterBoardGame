@@ -14,6 +14,7 @@ from server.event_protocol import (
     parse_error_message,
     parse_heartbeat_message,
     parse_illegal_state_detected_message,
+    parse_piece_removed_required_details_message,
     parse_piece_removed_required_message,
     parse_state_sync_message,
 )
@@ -49,6 +50,7 @@ class BoardClient:
         self.last_error = None
         self.last_desync = None
         self.last_piece_removed_required = None
+        self.last_piece_removed_replay_squares = None
         self.last_illegal_state = None
         self.last_heartbeat_status = None
 
@@ -227,12 +229,16 @@ class BoardClient:
             }
 
         if event_type == EventType.PIECE_REMOVED_REQUIRED:
-            # Store the list of squares that still need to be cleared physically.
-            self.last_piece_removed_required = parse_piece_removed_required_message(message)
+            # Store the list of squares that still need to be cleared physically,
+            # plus the authoritative replay path for the capture sequence.
+            piece_removed_details = parse_piece_removed_required_details_message(message)
+            self.last_piece_removed_required = piece_removed_details["squares_to_remove"]
+            self.last_piece_removed_replay_squares = piece_removed_details["replay_squares"]
 
             return {
                 "event_type": event_type,
-                "squares_to_remove": self.last_piece_removed_required
+                "squares_to_remove": self.last_piece_removed_required,
+                "replay_squares": self.last_piece_removed_replay_squares
             }
 
         if event_type == EventType.ILLEGAL_STATE_DETECTED:
