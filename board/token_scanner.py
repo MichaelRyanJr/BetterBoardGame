@@ -23,6 +23,12 @@ DEFAULT_COL_SHIFT_AFTER_CW = -1
 DEFAULT_EVEN_COL_SLOT_SHIFT = 1
 DEFAULT_ODD_COL_SLOT_SHIFT = 0
 
+# Remaining scanner-only row correction observed after the existing
+# inverse remap logic is applied. This is intentionally kept local to
+# the scanner layer so the rest of the software can stay on the clean
+# canonical 8x8 board coordinates.
+DEFAULT_POST_REMAP_ROW_MAP = [6, 5, 4, 3, 2, 1, 0, 7]
+
 
 def empty_scan_matrix():
     """Build a blank 8x8 occupancy matrix."""
@@ -418,6 +424,8 @@ def map_physical_scan_coordinate_to_logical(
         odd_row_slot_shift
     )
 
+    logical_row = apply_post_remap_logical_row_correction(logical_row)
+
     if not is_dark_square(logical_row, logical_col):
         raise ValueError(
             "Final logical scan coordinate landed on a non-playable tile: "
@@ -426,6 +434,40 @@ def map_physical_scan_coordinate_to_logical(
         )
 
     return logical_row, logical_col
+
+
+def apply_post_remap_logical_row_correction(logical_row, row_map=None):
+    """
+    Apply the final row-only correction after the normal inverse remap.
+
+    The currently observed scanner output still returns logical rows as:
+        0 -> 6
+        1 -> 5
+        2 -> 4
+        3 -> 3
+        4 -> 2
+        5 -> 1
+        6 -> 0
+        7 -> 7
+
+    Applying this correction after the existing remap logic fixes the
+    row numbering without disturbing the already-correct column mapping.
+    """
+    if row_map is None:
+        row_map = DEFAULT_POST_REMAP_ROW_MAP
+
+    if len(row_map) != BOARD_SIZE:
+        raise ValueError("row_map must contain exactly 8 row indices.")
+
+    if logical_row < 0 or logical_row >= BOARD_SIZE:
+        raise ValueError("logical_row must be between 0 and 7.")
+
+    corrected_row = row_map[logical_row]
+
+    if corrected_row < 0 or corrected_row >= BOARD_SIZE:
+        raise ValueError("row_map contains an invalid row index.")
+
+    return corrected_row
 
 
 def build_logical_scan_matrix_from_physical(
