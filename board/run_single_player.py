@@ -75,14 +75,14 @@ def main():
     args = parser.parse_args()
 
     runtime = SinglePlayerRuntime(
-        human_player=Player.BLACK,
+        human_player=Player.RED,
         difficulty=args.difficulty,
         scanner_mode=args.scanner_mode,
         led_mode=args.led_mode
     )
 
     print("Single-player runtime started.")
-    print("Human player:", Player.BLACK)
+    print("Human player:", Player.RED)
     print("Difficulty:", args.difficulty)
     print("Scanner mode:", args.scanner_mode)
     print("LED mode:", args.led_mode)
