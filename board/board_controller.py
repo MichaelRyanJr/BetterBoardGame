@@ -1,7 +1,18 @@
+import time
+
 from board.board_client import BoardClient, DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT
-from board.led_driver import LEDDriver
-from board.token_scanner import TokenScanner, clone_scan_matrix
-from shared.constants import EventType
+from board.led_driver import LEDDriver, build_opponent_led_matrix
+from board.token_scanner import TokenScanner, clone_scan_matrix, empty_scan_matrix
+from shared.constants import EventType, LED_ON
+from shared.game_state import Coordinate, Move
+from shared.move_validation import legal_moves_for_player
+from shared.rules import apply_move
+
+
+DEFAULT_CAPTURE_REPLAY_STEP_SECONDS = 0.5
+DEFAULT_CAPTURE_REMOVAL_BLINK_STEP_SECONDS = 0.5
+DEFAULT_ILLEGAL_BLINK_STEP_SECONDS = 0.35
+DEFAULT_OPPONENT_KING_BLINK_STEP_SECONDS = 0.18
 
 
 class BoardController:
@@ -14,9 +25,11 @@ class BoardController:
     - BoardClient for protocol/state handling
     - LEDDriver for board output
 
-    For now this controller focuses on scan-based messages and LED updates.
-    Candidate move inference can be added later without changing the overall
-    board-side structure.
+    Multiplayer LED behavior mirrors the single-player runtime where practical:
+    - opponent kings blink quickly
+    - opponent capture replay blinks until the local captured piece is removed
+    - if the local player makes an illegal physical move, every missing expected
+      local-piece square blinks until the board is corrected
     """
 
     def __init__(
@@ -32,7 +45,11 @@ class BoardController:
         client=None,
         scanner_mode="gpio",
         scanner_stable_reads_required=2,
-        led_mode="hardware"
+        led_mode="hardware",
+        capture_replay_step_seconds=DEFAULT_CAPTURE_REPLAY_STEP_SECONDS,
+        capture_removal_blink_step_seconds=DEFAULT_CAPTURE_REMOVAL_BLINK_STEP_SECONDS,
+        illegal_blink_step_seconds=DEFAULT_ILLEGAL_BLINK_STEP_SECONDS,
+        opponent_king_blink_step_seconds=DEFAULT_OPPONENT_KING_BLINK_STEP_SECONDS,
     ):
         self.board_id = board_id
         self.local_player = local_player
@@ -68,6 +85,22 @@ class BoardController:
         # These are squares where the server says a captured piece still needs
         # to be physically removed from the board.
         self.pending_capture_removal_squares = []
+
+        # Replay the opponent move path while waiting for captured-piece removal.
+        self.pending_opponent_capture_replay_squares = []
+
+        # Blink all local piece squares that must be restored after an illegal
+        # physical move. These are guidance-only and do not affect protocol.
+        self.pending_illegal_return_squares = []
+
+        self.capture_replay_step_seconds = float(capture_replay_step_seconds)
+        self.capture_removal_blink_step_seconds = float(capture_removal_blink_step_seconds)
+        self.illegal_blink_step_seconds = float(illegal_blink_step_seconds)
+        self.opponent_king_blink_step_seconds = float(opponent_king_blink_step_seconds)
+
+        self.capture_replay_started_at = None
+        self.illegal_blink_started_at = None
+        self.king_blink_started_at = time.monotonic()
 
     def set_local_player(self, local_player):
         """Store which side this physical board belongs to."""
@@ -115,7 +148,21 @@ class BoardController:
     def clear_pending_capture_removal(self):
         """Clear the current capture-removal requirement."""
         self.pending_capture_removal_squares = []
+        self.pending_opponent_capture_replay_squares = []
+        self.capture_replay_started_at = None
         self.refresh_led_display()
+
+    def clear_pending_illegal_return_squares(self):
+        """Clear local illegal-move guidance LEDs."""
+        self.pending_illegal_return_squares = []
+        self.illegal_blink_started_at = None
+        self.refresh_led_display()
+
+    def has_pending_illegal_return_square(self):
+        """
+        Kept for compatibility with earlier logic/tests.
+        """
+        return len(self.pending_illegal_return_squares) > 0
 
     def capture_removal_is_complete(self, scan_matrix):
         """
@@ -133,32 +180,436 @@ class BoardController:
 
         return True
 
+    def get_blink_phase_is_on(self, started_at, step_seconds):
+        if started_at is None:
+            return True
+
+        if step_seconds <= 0:
+            return True
+
+        elapsed_seconds = time.monotonic() - started_at
+        phase_index = int(elapsed_seconds / step_seconds)
+        return (phase_index % 2) == 0
+
+    def get_replay_square_for_current_phase(self, squares, started_at, step_seconds):
+        if len(squares) == 0:
+            return None
+
+        if started_at is None:
+            return squares[0]
+
+        if step_seconds <= 0:
+            return squares[0]
+
+        elapsed_seconds = time.monotonic() - started_at
+        phase_index = int(elapsed_seconds / step_seconds)
+        square_index = phase_index % len(squares)
+        return squares[square_index]
+
+    def build_led_matrix_with_highlighted_squares(self, base_led_matrix, squares):
+        led_matrix = []
+
+        for row in range(8):
+            led_row = []
+
+            for col in range(8):
+                led_row.append(base_led_matrix[row][col])
+
+            led_matrix.append(led_row)
+
+        for square in squares:
+            if square is None:
+                continue
+
+            led_matrix[square.row][square.col] = LED_ON
+
+        return led_matrix
+
+    def get_opponent_king_squares(self, state):
+        king_squares = []
+
+        if state is None:
+            return king_squares
+
+        if self.local_player is None:
+            return king_squares
+
+        opponent = self.local_player.get_opponent()
+
+        for row in range(8):
+            for col in range(8):
+                piece = state.board[row][col]
+
+                if piece is None:
+                    continue
+
+                if piece.owner != opponent:
+                    continue
+
+                if not piece.is_king:
+                    continue
+
+                king_squares.append(Coordinate(row, col))
+
+        return king_squares
+
+    def has_blinking_opponent_king(self):
+        state = self.get_state()
+        return len(self.get_opponent_king_squares(state)) > 0
+
+    def build_opponent_led_matrix_with_blinking_kings(self, state):
+        if state is None:
+            return empty_scan_matrix()
+
+        if self.local_player is None:
+            return empty_scan_matrix()
+
+        led_matrix = build_opponent_led_matrix(state, self.local_player)
+        king_squares = self.get_opponent_king_squares(state)
+
+        if len(king_squares) == 0:
+            return led_matrix
+
+        blink_is_on = self.get_blink_phase_is_on(
+            self.king_blink_started_at,
+            self.opponent_king_blink_step_seconds
+        )
+
+        for square in king_squares:
+            if blink_is_on:
+                led_matrix[square.row][square.col] = LED_ON
+            else:
+                led_matrix[square.row][square.col] = 0
+
+        return led_matrix
+
+    def build_expected_scan_for_local_player(self, state):
+        """
+        Build the physical occupancy matrix this board should show for the
+        local player's real pieces.
+        """
+        scan_matrix = empty_scan_matrix()
+
+        if state is None:
+            return scan_matrix
+
+        if self.local_player is None:
+            return scan_matrix
+
+        for row in range(8):
+            for col in range(8):
+                square = Coordinate(row, col)
+                piece = state.piece_at(square)
+
+                if piece is None:
+                    continue
+
+                if piece.owner != self.local_player:
+                    continue
+
+                scan_matrix[row][col] = True
+
+        return scan_matrix
+
+    def scan_matrices_match(self, first_matrix, second_matrix):
+        for row in range(8):
+            for col in range(8):
+                if bool(first_matrix[row][col]) != bool(second_matrix[row][col]):
+                    return False
+
+        return True
+
+    def find_missing_piece_return_squares(self, expected_scan, actual_scan):
+        missing_squares = []
+
+        for row in range(8):
+            for col in range(8):
+                expected_has_piece = bool(expected_scan[row][col])
+                actual_has_piece = bool(actual_scan[row][col])
+
+                if expected_has_piece and not actual_has_piece:
+                    missing_squares.append(Coordinate(row, col))
+
+        return missing_squares
+
+    def build_move_from_candidate_action(self, action):
+        captured_squares = []
+
+        for square in action.captured_squares:
+            captured_squares.append(Coordinate(square.row, square.col))
+
+        return Move(
+            player=self.local_player,
+            from_square=Coordinate(action.from_square.row, action.from_square.col),
+            to_square=Coordinate(action.to_square.row, action.to_square.col),
+            captured_squares=captured_squares
+        )
+
+    def infer_matching_local_move_from_scan(self, scan_matrix):
+        """
+        Infer whether a stable physical scan matches exactly one legal local move.
+
+        This is guidance-only. The board still sends stable_scan snapshots to the
+        server and the server remains authoritative.
+        """
+        state = self.get_state()
+
+        if state is None:
+            return {
+                "status": "no_state",
+                "move": None
+            }
+
+        if self.local_player is None:
+            return {
+                "status": "no_local_player",
+                "move": None
+            }
+
+        matching_moves = []
+        legal_actions = legal_moves_for_player(state, self.local_player)
+
+        for action in legal_actions:
+            candidate_move = self.build_move_from_candidate_action(action)
+
+            temp_state = state.clone()
+            applied_move, validation = apply_move(temp_state, candidate_move)
+
+            if not validation.is_legal:
+                continue
+
+            expected_scan = self.build_expected_scan_for_local_player(temp_state)
+
+            if self.scan_matrices_match(scan_matrix, expected_scan):
+                matching_moves.append(candidate_move)
+
+        if len(matching_moves) == 1:
+            return {
+                "status": "match",
+                "move": matching_moves[0]
+            }
+
+        if len(matching_moves) == 0:
+            return {
+                "status": "no_match",
+                "move": None
+            }
+
+        return {
+            "status": "ambiguous",
+            "move": None
+        }
+
+    def update_illegal_move_guidance_from_scan(self, scan_matrix):
+        """
+        Decide whether the stable local scan should show illegal-move guidance.
+
+        Rules:
+        - no guidance while waiting for captured-piece removal
+        - no guidance without a canonical state or local-player assignment
+        - no guidance if the scan already matches the canonical local occupancy
+        - no guidance if the scan matches at least one legal local move from the
+          current canonical state, because that move may simply be waiting for
+          server validation/sync
+        - otherwise blink every missing expected local-piece square
+        """
+        if self.has_pending_capture_removal():
+            self.pending_illegal_return_squares = []
+            self.illegal_blink_started_at = None
+            return
+
+        state = self.get_state()
+
+        if state is None or self.local_player is None:
+            self.pending_illegal_return_squares = []
+            self.illegal_blink_started_at = None
+            return
+
+        expected_scan = self.build_expected_scan_for_local_player(state)
+
+        if self.scan_matrices_match(scan_matrix, expected_scan):
+            self.pending_illegal_return_squares = []
+            self.illegal_blink_started_at = None
+            return
+
+        inference_result = self.infer_matching_local_move_from_scan(scan_matrix)
+        inference_status = inference_result["status"]
+
+        if inference_status == "match":
+            self.pending_illegal_return_squares = []
+            self.illegal_blink_started_at = None
+            return
+
+        if inference_status == "ambiguous":
+            self.pending_illegal_return_squares = []
+            self.illegal_blink_started_at = None
+            return
+
+        missing_squares = self.find_missing_piece_return_squares(
+            expected_scan,
+            scan_matrix
+        )
+
+        self.pending_illegal_return_squares = missing_squares
+
+        if len(self.pending_illegal_return_squares) > 0:
+            if self.illegal_blink_started_at is None:
+                self.illegal_blink_started_at = time.monotonic()
+        else:
+            self.illegal_blink_started_at = None
+
+    def infer_opponent_capture_replay_squares(self, previous_state, new_state):
+        """
+        Infer a simple opponent move replay path from one canonical state update.
+
+        Without extra protocol metadata we can reliably infer the opponent's
+        start and end squares, but not every intermediate landing square of a
+        multi-jump. Returning [from_square, to_square] still gives the local
+        player a clear cue while waiting to remove a captured piece.
+        """
+        replay_squares = []
+
+        if previous_state is None or new_state is None:
+            return replay_squares
+
+        if self.local_player is None:
+            return replay_squares
+
+        opponent = self.local_player.get_opponent()
+
+        old_local_count = previous_state.count_pieces(self.local_player)
+        new_local_count = new_state.count_pieces(self.local_player)
+
+        if new_local_count >= old_local_count:
+            return replay_squares
+
+        moved_from_squares = []
+        moved_to_squares = []
+
+        for row in range(8):
+            for col in range(8):
+                old_piece = previous_state.board[row][col]
+                new_piece = new_state.board[row][col]
+
+                old_is_opponent = old_piece is not None and old_piece.owner == opponent
+                new_is_opponent = new_piece is not None and new_piece.owner == opponent
+
+                if old_is_opponent and not new_is_opponent:
+                    moved_from_squares.append(Coordinate(row, col))
+
+                if new_is_opponent and not old_is_opponent:
+                    moved_to_squares.append(Coordinate(row, col))
+
+        if len(moved_from_squares) != 1:
+            return replay_squares
+
+        if len(moved_to_squares) != 1:
+            return replay_squares
+
+        replay_squares.append(moved_from_squares[0])
+
+        destination_square = moved_to_squares[0]
+        if (
+            replay_squares[0].row != destination_square.row
+            or replay_squares[0].col != destination_square.col
+        ):
+            replay_squares.append(destination_square)
+
+        return replay_squares
+
     def refresh_led_display(self):
         """
         Update the LEDs based on the current board-side situation.
 
         Priority:
-        1. show required captured-piece removals
-        2. otherwise show the opponent's current positions
-        3. otherwise clear the LEDs
+        1. if the opponent just captured, replay the opponent move path until
+           the local captured piece is physically removed
+        2. if the local player made an illegal physical move, blink every square
+           where a local piece must be restored
+        3. otherwise show the opponent's current positions, with opponent kings
+           blinking quickly
+        4. otherwise clear the LEDs
         """
-        if self.has_pending_capture_removal():
-            self.led_driver.display_capture_removal_squares(
-                self.pending_capture_removal_squares
-            )
-            return
-
         state = self.client.get_state()
 
-        if state is None:
+        if self.has_pending_capture_removal():
+            if state is None or self.local_player is None:
+                self.led_driver.clear()
+                return
+
+            base_led_matrix = self.build_opponent_led_matrix_with_blinking_kings(state)
+
+            if len(self.pending_opponent_capture_replay_squares) > 0:
+                if self.capture_replay_started_at is None:
+                    self.capture_replay_started_at = time.monotonic()
+
+                replay_square = self.get_replay_square_for_current_phase(
+                    self.pending_opponent_capture_replay_squares,
+                    self.capture_replay_started_at,
+                    self.capture_replay_step_seconds
+                )
+
+                for replay_path_square in self.pending_opponent_capture_replay_squares:
+                    if replay_path_square is None:
+                        continue
+
+                    base_led_matrix[replay_path_square.row][replay_path_square.col] = False
+
+                if replay_square is not None:
+                    base_led_matrix[replay_square.row][replay_square.col] = LED_ON
+
+                self.led_driver.set_led_matrix(base_led_matrix)
+                return
+
+            removal_blink_is_on = self.get_blink_phase_is_on(
+                self.capture_replay_started_at,
+                self.capture_removal_blink_step_seconds
+            )
+
+            if removal_blink_is_on:
+                self.led_driver.display_capture_removal_squares(
+                    self.pending_capture_removal_squares
+                )
+            else:
+                self.led_driver.clear()
+
+            return
+
+        self.capture_replay_started_at = None
+
+        if self.has_pending_illegal_return_square():
+            if state is None or self.local_player is None:
+                self.led_driver.clear()
+                return
+
+            if self.illegal_blink_started_at is None:
+                self.illegal_blink_started_at = time.monotonic()
+
+            base_led_matrix = self.build_opponent_led_matrix_with_blinking_kings(state)
+            blink_is_on = self.get_blink_phase_is_on(
+                self.illegal_blink_started_at,
+                self.illegal_blink_step_seconds
+            )
+
+            if blink_is_on:
+                led_matrix = self.build_led_matrix_with_highlighted_squares(
+                    base_led_matrix,
+                    self.pending_illegal_return_squares
+                )
+                self.led_driver.set_led_matrix(led_matrix)
+            else:
+                self.led_driver.set_led_matrix(base_led_matrix)
+
+            return
+
+        self.illegal_blink_started_at = None
+
+        if state is None or self.local_player is None:
             self.led_driver.clear()
             return
 
-        if self.local_player is None:
-            self.led_driver.clear()
-            return
-
-        self.led_driver.display_opponent_pieces(state, self.local_player)
+        led_matrix = self.build_opponent_led_matrix_with_blinking_kings(state)
+        self.led_driver.set_led_matrix(led_matrix)
 
     def read_scan_matrix(self):
         """
@@ -175,7 +626,11 @@ class BoardController:
 
             if self.capture_removal_is_complete(scan_matrix):
                 self.pending_capture_removal_squares = []
-                self.refresh_led_display()
+                self.pending_opponent_capture_replay_squares = []
+                self.capture_replay_started_at = None
+
+            self.update_illegal_move_guidance_from_scan(scan_matrix)
+            self.refresh_led_display()
 
         return clone_scan_matrix(scan_matrix)
 
@@ -197,7 +652,15 @@ class BoardController:
         Current behavior:
         - always build one scan_snapshot
         - build stable_scan only when a new stable matrix appears
+        - keep LED blink states animating during the polling loop
         """
+        if (
+            self.has_pending_capture_removal()
+            or self.has_pending_illegal_return_square()
+            or self.has_blinking_opponent_king()
+        ):
+            self.refresh_led_display()
+
         scan_matrix = self.read_scan_matrix()
 
         outbound_messages = [
@@ -238,16 +701,38 @@ class BoardController:
         """
         Process one incoming protocol message and update board output.
         """
+        previous_state = self.client.get_state()
         result = self.client.handle_incoming_message(message)
         event_type = result["event_type"]
 
         if event_type == EventType.STATE_SYNC:
+            state_updated = result.get("state_updated", False)
+
+            if state_updated:
+                new_state = self.client.get_state()
+                replay_squares = self.infer_opponent_capture_replay_squares(
+                    previous_state,
+                    new_state
+                )
+
+                self.pending_opponent_capture_replay_squares = replay_squares
+                if len(replay_squares) > 0:
+                    self.capture_replay_started_at = time.monotonic()
+
             self.refresh_led_display()
             return result
 
         if event_type == EventType.PIECE_REMOVED_REQUIRED:
             squares_to_remove = result.get("squares_to_remove", [])
             self.pending_capture_removal_squares = list(squares_to_remove)
+
+            if len(self.pending_capture_removal_squares) > 0:
+                if self.capture_replay_started_at is None:
+                    self.capture_replay_started_at = time.monotonic()
+            else:
+                self.capture_replay_started_at = None
+                self.pending_opponent_capture_replay_squares = []
+
             self.refresh_led_display()
             return result
 
