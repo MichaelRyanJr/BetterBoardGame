@@ -1,6 +1,7 @@
 from ai.difficulty_profiles import get_depth_for_difficulty
+import time
 from ai.minimax import choose_best_move
-from board.led_driver import LEDDriver
+from board.led_driver import LEDDriver, build_opponent_led_matrix
 from board.local_state_cache import LocalStateCache
 from board.token_scanner import (
     TokenScanner,
@@ -9,10 +10,14 @@ from board.token_scanner import (
     empty_scan_matrix,
     normalize_scan_matrix,
 )
-from shared.constants import Difficulty, ErrorCode, GameMode, Player
+from shared.constants import Difficulty, ErrorCode, GameMode, LED_ON, Player
 from shared.game_state import Coordinate, GameState, Move
 from shared.move_validation import legal_moves_for_player
 from shared.rules import apply_move
+
+
+DEFAULT_CAPTURE_REPLAY_STEP_SECONDS = 0.35
+DEFAULT_ILLEGAL_BLINK_STEP_SECONDS = 0.35
 
 
 class SinglePlayerRuntime:
@@ -38,7 +43,9 @@ class SinglePlayerRuntime:
         led_driver=None,
         scanner_mode="gpio",
         scanner_stable_reads_required=2,
-        led_mode="hardware"
+        led_mode="hardware",
+        capture_replay_step_seconds=DEFAULT_CAPTURE_REPLAY_STEP_SECONDS,
+        illegal_blink_step_seconds=DEFAULT_ILLEGAL_BLINK_STEP_SECONDS
     ):
         self.human_player = human_player
         self.ai_player = human_player.get_opponent()
@@ -64,6 +71,12 @@ class SinglePlayerRuntime:
         self.last_handled_stable_scan = None
 
         self.pending_human_piece_removal_squares = []
+        self.pending_ai_capture_replay_squares = []
+        self.pending_illegal_return_square = None
+        self.capture_replay_step_seconds = float(capture_replay_step_seconds)
+        self.illegal_blink_step_seconds = float(illegal_blink_step_seconds)
+        self.capture_replay_started_at = None
+        self.illegal_blink_started_at = None
         self.last_error_code = None
         self.last_message = ""
 
@@ -75,6 +88,10 @@ class SinglePlayerRuntime:
         self.state_cache.set_state(state)
 
         self.pending_human_piece_removal_squares = []
+        self.pending_ai_capture_replay_squares = []
+        self.pending_illegal_return_square = None
+        self.capture_replay_started_at = None
+        self.illegal_blink_started_at = None
         self.latest_raw_scan_matrix = None
         self.latest_stable_scan_matrix = None
         self.last_handled_stable_scan = None
@@ -129,7 +146,106 @@ class SinglePlayerRuntime:
 
     def clear_pending_human_piece_removal(self):
         self.pending_human_piece_removal_squares = []
+        self.pending_ai_capture_replay_squares = []
+        self.capture_replay_started_at = None
         self.refresh_led_display()
+
+    def clear_pending_illegal_return_square(self):
+        self.pending_illegal_return_square = None
+        self.illegal_blink_started_at = None
+        self.refresh_led_display()
+
+    def has_pending_illegal_return_square(self):
+        return self.pending_illegal_return_square is not None
+
+    def build_led_matrix_with_highlighted_squares(self, base_led_matrix, squares):
+        led_matrix = []
+
+        for row in range(8):
+            led_row = []
+
+            for col in range(8):
+                led_row.append(base_led_matrix[row][col])
+
+            led_matrix.append(led_row)
+
+        for square in squares:
+            if square is None:
+                continue
+
+            led_matrix[square.row][square.col] = LED_ON
+
+        return led_matrix
+
+    def get_blink_phase_is_on(self, started_at, step_seconds):
+        if started_at is None:
+            return True
+
+        if step_seconds <= 0:
+            return True
+
+        elapsed_seconds = time.monotonic() - started_at
+        phase_index = int(elapsed_seconds / step_seconds)
+        return (phase_index % 2) == 0
+
+    def get_replay_square_for_current_phase(self, squares, started_at, step_seconds):
+        if len(squares) == 0:
+            return None
+
+        if started_at is None:
+            return squares[0]
+
+        if step_seconds <= 0:
+            return squares[0]
+
+        elapsed_seconds = time.monotonic() - started_at
+        phase_index = int(elapsed_seconds / step_seconds)
+        square_index = phase_index % len(squares)
+        return squares[square_index]
+
+    def build_ai_capture_replay_squares(self, applied_ai_moves):
+        replay_squares = []
+
+        for move_index in range(len(applied_ai_moves)):
+            applied_move = applied_ai_moves[move_index]
+
+            if move_index == 0:
+                replay_squares.append(applied_move.move.from_square)
+
+            if len(replay_squares) == 0:
+                replay_squares.append(applied_move.move.to_square)
+            else:
+                previous_square = replay_squares[len(replay_squares) - 1]
+
+                if previous_square.row != applied_move.move.to_square.row:
+                    replay_squares.append(applied_move.move.to_square)
+                elif previous_square.col != applied_move.move.to_square.col:
+                    replay_squares.append(applied_move.move.to_square)
+
+        return replay_squares
+
+    def find_single_piece_return_square(self, expected_scan, actual_scan):
+        missing_squares = []
+        unexpected_squares = []
+
+        for row in range(8):
+            for col in range(8):
+                expected_has_piece = bool(expected_scan[row][col])
+                actual_has_piece = bool(actual_scan[row][col])
+
+                if expected_has_piece and not actual_has_piece:
+                    missing_squares.append(Coordinate(row, col))
+
+                if actual_has_piece and not expected_has_piece:
+                    unexpected_squares.append(Coordinate(row, col))
+
+        if len(missing_squares) != 1:
+            return None
+
+        if len(unexpected_squares) > 1:
+            return None
+
+        return missing_squares[0]
 
     def build_status_result(self, status, extra=None):
         """Build a small result dictionary for debugging and caller logic."""
@@ -138,6 +254,7 @@ class SinglePlayerRuntime:
             "error_code": self.last_error_code,
             "message": self.last_message,
             "pending_human_piece_removal": list(self.pending_human_piece_removal_squares),
+            "pending_illegal_return_square": self.pending_illegal_return_square,
             "state": self.get_state()
         }
 
@@ -199,17 +316,72 @@ class SinglePlayerRuntime:
         Update LEDs for the current local single-player situation.
 
         Priority:
-        1. show required human piece removals after an AI capture
-        2. otherwise show the AI player's current positions
-        3. otherwise clear the LEDs
+        1. if the AI just captured, replay the AI move path until the user
+           removes the captured physical piece
+        2. if the user made an illegal physical move, blink the square the
+           piece must return to until the board is corrected
+        3. otherwise show the AI player's current positions
+        4. otherwise clear the LEDs
         """
+        state = self.get_state()
+
         if self.has_pending_human_piece_removal():
+            if state is None:
+                self.led_driver.clear()
+                return
+
+            base_led_matrix = build_opponent_led_matrix(state, self.human_player)
+
+            if len(self.pending_ai_capture_replay_squares) > 0:
+                if self.capture_replay_started_at is None:
+                    self.capture_replay_started_at = time.monotonic()
+
+                replay_square = self.get_replay_square_for_current_phase(
+                    self.pending_ai_capture_replay_squares,
+                    self.capture_replay_started_at,
+                    self.capture_replay_step_seconds
+                )
+
+                led_matrix = self.build_led_matrix_with_highlighted_squares(
+                    base_led_matrix,
+                    [replay_square]
+                )
+                self.led_driver.set_led_matrix(led_matrix)
+                return
+
             self.led_driver.display_capture_removal_squares(
                 self.pending_human_piece_removal_squares
             )
             return
 
-        state = self.get_state()
+        self.capture_replay_started_at = None
+
+        if self.has_pending_illegal_return_square():
+            if state is None:
+                self.led_driver.clear()
+                return
+
+            if self.illegal_blink_started_at is None:
+                self.illegal_blink_started_at = time.monotonic()
+
+            base_led_matrix = build_opponent_led_matrix(state, self.human_player)
+            blink_is_on = self.get_blink_phase_is_on(
+                self.illegal_blink_started_at,
+                self.illegal_blink_step_seconds
+            )
+
+            if blink_is_on:
+                led_matrix = self.build_led_matrix_with_highlighted_squares(
+                    base_led_matrix,
+                    [self.pending_illegal_return_square]
+                )
+                self.led_driver.set_led_matrix(led_matrix)
+            else:
+                self.led_driver.set_led_matrix(base_led_matrix)
+
+            return
+
+        self.illegal_blink_started_at = None
 
         if state is None:
             self.led_driver.clear()
@@ -231,6 +403,8 @@ class SinglePlayerRuntime:
                     self.pending_human_piece_removal_squares
                 ):
                     self.pending_human_piece_removal_squares = []
+                    self.pending_ai_capture_replay_squares = []
+                    self.capture_replay_started_at = None
                     self.refresh_led_display()
 
         return clone_scan_matrix(scan_matrix)
@@ -247,6 +421,9 @@ class SinglePlayerRuntime:
         """
         Read the scanner once and process the scan only if it is stable.
         """
+        if self.has_pending_human_piece_removal() or self.has_pending_illegal_return_square():
+            self.refresh_led_display()
+
         stable_scan = self.read_stable_scan_matrix()
 
         if stable_scan is None:
@@ -348,6 +525,8 @@ class SinglePlayerRuntime:
             )
 
         self.state_cache.set_state(state)
+        self.pending_illegal_return_square = None
+        self.illegal_blink_started_at = None
         self.clear_error()
         self.refresh_led_display()
 
@@ -438,6 +617,15 @@ class SinglePlayerRuntime:
                 break
 
         self.pending_human_piece_removal_squares = all_captured_squares
+        self.pending_ai_capture_replay_squares = self.build_ai_capture_replay_squares(applied_ai_moves)
+
+        if len(self.pending_human_piece_removal_squares) > 0:
+            self.capture_replay_started_at = time.monotonic()
+        else:
+            self.capture_replay_started_at = None
+
+        self.pending_illegal_return_square = None
+        self.illegal_blink_started_at = None
         self.clear_error()
         self.refresh_led_display()
 
@@ -489,6 +677,8 @@ class SinglePlayerRuntime:
                 expected_scan = self.build_expected_scan_for_human(state)
 
                 if self.scan_matrices_match(normalized_scan, expected_scan):
+                    self.pending_illegal_return_square = None
+                    self.illegal_blink_started_at = None
                     self.clear_error()
                     return self.build_status_result("capture_removal_complete")
 
@@ -507,6 +697,8 @@ class SinglePlayerRuntime:
         expected_scan = self.build_expected_scan_for_human(state)
 
         if self.scan_matrices_match(normalized_scan, expected_scan):
+            self.pending_illegal_return_square = None
+            self.illegal_blink_started_at = None
             self.clear_error()
 
             if state.winner is not None:
@@ -542,10 +734,28 @@ class SinglePlayerRuntime:
             return self.build_status_result("error")
 
         if inference_status == "no_match":
-            self.set_error(
-                ErrorCode.DESYNC,
-                "The stable scan does not match any legal human move from the current state."
+            return_square = self.find_single_piece_return_square(
+                expected_scan,
+                normalized_scan
             )
+
+            self.pending_illegal_return_square = return_square
+
+            if return_square is not None:
+                self.illegal_blink_started_at = time.monotonic()
+                self.set_error(
+                    ErrorCode.DESYNC,
+                    "The stable scan does not match any legal human move. Move the piece back to row "
+                    + str(return_square.row) + ", col " + str(return_square.col) + "."
+                )
+                self.refresh_led_display()
+            else:
+                self.illegal_blink_started_at = None
+                self.set_error(
+                    ErrorCode.DESYNC,
+                    "The stable scan does not match any legal human move from the current state."
+                )
+
             return self.build_status_result("error")
 
         if inference_status == "no_state":
@@ -588,11 +798,3 @@ class SinglePlayerRuntime:
                 "human_move": human_move
             }
         )
-
-    def shutdown(self):
-        """Clean up hardware resources."""
-        if hasattr(self.scanner, "shutdown"):
-            self.scanner.shutdown()
-
-        if hasattr(self.led_driver, "shutdown"):
-            self.led_driver.shutdown()
