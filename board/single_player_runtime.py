@@ -76,7 +76,7 @@ class SinglePlayerRuntime:
 
         self.pending_human_piece_removal_squares = []
         self.pending_ai_capture_replay_squares = []
-        self.pending_illegal_return_square = None
+        self.pending_illegal_return_squares = []
         self.capture_replay_step_seconds = float(capture_replay_step_seconds)
         self.capture_removal_blink_step_seconds = float(capture_removal_blink_step_seconds)
         self.illegal_blink_step_seconds = float(illegal_blink_step_seconds)
@@ -96,7 +96,7 @@ class SinglePlayerRuntime:
 
         self.pending_human_piece_removal_squares = []
         self.pending_ai_capture_replay_squares = []
-        self.pending_illegal_return_square = None
+        self.pending_illegal_return_squares = []
         self.capture_replay_started_at = None
         self.illegal_blink_started_at = None
         self.latest_raw_scan_matrix = None
@@ -157,13 +157,16 @@ class SinglePlayerRuntime:
         self.capture_replay_started_at = None
         self.refresh_led_display()
 
-    def clear_pending_illegal_return_square(self):
-        self.pending_illegal_return_square = None
+    def clear_pending_illegal_return_squares(self):
+        self.pending_illegal_return_squares = []
         self.illegal_blink_started_at = None
         self.refresh_led_display()
 
     def has_pending_illegal_return_square(self):
-        return self.pending_illegal_return_square is not None
+        """
+        Kept for compatibility with earlier logic/callers.
+        """
+        return len(self.pending_illegal_return_squares) > 0
 
     def build_led_matrix_with_highlighted_squares(self, base_led_matrix, squares):
         led_matrix = []
@@ -278,9 +281,8 @@ class SinglePlayerRuntime:
 
         return replay_squares
 
-    def find_single_piece_return_square(self, expected_scan, actual_scan):
+    def find_missing_piece_return_squares(self, expected_scan, actual_scan):
         missing_squares = []
-        unexpected_squares = []
 
         for row in range(8):
             for col in range(8):
@@ -290,25 +292,33 @@ class SinglePlayerRuntime:
                 if expected_has_piece and not actual_has_piece:
                     missing_squares.append(Coordinate(row, col))
 
-                if actual_has_piece and not expected_has_piece:
-                    unexpected_squares.append(Coordinate(row, col))
+        return missing_squares
 
-        if len(missing_squares) != 1:
-            return None
+    def build_coordinate_list_text(self, squares):
+        if len(squares) == 0:
+            return ""
 
-        if len(unexpected_squares) > 1:
-            return None
+        parts = []
 
-        return missing_squares[0]
+        for square in squares:
+            parts.append("(" + str(square.row) + ", " + str(square.col) + ")")
+
+        return ", ".join(parts)
 
     def build_status_result(self, status, extra=None):
         """Build a small result dictionary for debugging and caller logic."""
+        first_illegal_square = None
+
+        if len(self.pending_illegal_return_squares) > 0:
+            first_illegal_square = self.pending_illegal_return_squares[0]
+
         result = {
             "status": status,
             "error_code": self.last_error_code,
             "message": self.last_message,
             "pending_human_piece_removal": list(self.pending_human_piece_removal_squares),
-            "pending_illegal_return_square": self.pending_illegal_return_square,
+            "pending_illegal_return_square": first_illegal_square,
+            "pending_illegal_return_squares": list(self.pending_illegal_return_squares),
             "state": self.get_state()
         }
 
@@ -372,8 +382,8 @@ class SinglePlayerRuntime:
         Priority:
         1. if the AI just captured, replay the AI move path until the user
            removes the captured physical piece
-        2. if the user made an illegal physical move, blink the square the
-           piece must return to until the board is corrected
+        2. if the user made an illegal physical move, blink every square where
+           a human piece must be restored
         3. otherwise show the AI player's current positions
         4. otherwise clear the LEDs
         """
@@ -396,10 +406,6 @@ class SinglePlayerRuntime:
                     self.capture_replay_step_seconds
                 )
 
-                # Hide the entire replay path from the steady AI display while
-                # waiting for the human to remove the captured piece. This keeps
-                # the AI piece's final landing square from appearing solid before
-                # the replay cue has served its purpose.
                 for replay_path_square in self.pending_ai_capture_replay_squares:
                     if replay_path_square is None:
                         continue
@@ -445,7 +451,7 @@ class SinglePlayerRuntime:
             if blink_is_on:
                 led_matrix = self.build_led_matrix_with_highlighted_squares(
                     base_led_matrix,
-                    [self.pending_illegal_return_square]
+                    self.pending_illegal_return_squares
                 )
                 self.led_driver.set_led_matrix(led_matrix)
             else:
@@ -602,7 +608,7 @@ class SinglePlayerRuntime:
             )
 
         self.state_cache.set_state(state)
-        self.pending_illegal_return_square = None
+        self.pending_illegal_return_squares = []
         self.illegal_blink_started_at = None
         self.clear_error()
         self.refresh_led_display()
@@ -701,7 +707,7 @@ class SinglePlayerRuntime:
         else:
             self.capture_replay_started_at = None
 
-        self.pending_illegal_return_square = None
+        self.pending_illegal_return_squares = []
         self.illegal_blink_started_at = None
         self.clear_error()
         self.refresh_led_display()
@@ -754,7 +760,7 @@ class SinglePlayerRuntime:
                 expected_scan = self.build_expected_scan_for_human(state)
 
                 if self.scan_matrices_match(normalized_scan, expected_scan):
-                    self.pending_illegal_return_square = None
+                    self.pending_illegal_return_squares = []
                     self.illegal_blink_started_at = None
                     self.clear_error()
                     return self.build_status_result("capture_removal_complete")
@@ -774,7 +780,7 @@ class SinglePlayerRuntime:
         expected_scan = self.build_expected_scan_for_human(state)
 
         if self.scan_matrices_match(normalized_scan, expected_scan):
-            self.pending_illegal_return_square = None
+            self.pending_illegal_return_squares = []
             self.illegal_blink_started_at = None
             self.clear_error()
 
@@ -811,19 +817,21 @@ class SinglePlayerRuntime:
             return self.build_status_result("error")
 
         if inference_status == "no_match":
-            return_square = self.find_single_piece_return_square(
+            return_squares = self.find_missing_piece_return_squares(
                 expected_scan,
                 normalized_scan
             )
 
-            self.pending_illegal_return_square = return_square
+            self.pending_illegal_return_squares = return_squares
 
-            if return_square is not None:
+            if len(return_squares) > 0:
                 self.illegal_blink_started_at = time.monotonic()
+                square_list_text = self.build_coordinate_list_text(return_squares)
+
                 self.set_error(
                     ErrorCode.DESYNC,
-                    "The stable scan does not match any legal human move. Move the piece back to row "
-                    + str(return_square.row) + ", col " + str(return_square.col) + "."
+                    "The stable scan does not match any legal human move. Put a piece back on: "
+                    + square_list_text + "."
                 )
                 self.refresh_led_display()
             else:
