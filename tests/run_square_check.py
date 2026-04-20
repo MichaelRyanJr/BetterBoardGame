@@ -1,4 +1,11 @@
+import sys
 import time
+from pathlib import Path
+
+# Make the repo root importable even when this file is run directly from /tests.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from board.led_driver import LEDDriver
 from board.token_scanner import TokenScanner
