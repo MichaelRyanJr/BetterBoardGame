@@ -1,11 +1,15 @@
 import argparse
 import time
 
+from board.led_driver import empty_led_matrix
 from board.single_player_runtime import SinglePlayerRuntime
-from shared.constants import Difficulty, Player
+from shared.constants import Difficulty, LED_ON, Player
+from shared.constants import is_dark_square
 
 
 POST_GAME_SCAN_INTERVAL_SECONDS = 0.05
+BOARD_CLEAR_REQUEST_BLINK_COUNT = 5
+BOARD_CLEAR_REQUEST_BLINK_STEP_SECONDS = 0.2
 
 
 def parse_difficulty(value):
@@ -44,6 +48,30 @@ def scan_is_empty(scan_matrix):
                 return False
 
     return True
+
+
+def build_all_playable_leds_on_matrix():
+    led_matrix = empty_led_matrix()
+
+    for row in range(8):
+        for col in range(8):
+            if is_dark_square(row, col):
+                led_matrix[row][col] = LED_ON
+
+    return led_matrix
+
+
+def blink_all_leds_for_board_clear_request(runtime):
+    on_matrix = build_all_playable_leds_on_matrix()
+    off_matrix = empty_led_matrix()
+
+    for _ in range(BOARD_CLEAR_REQUEST_BLINK_COUNT):
+        runtime.led_driver.set_led_matrix(on_matrix)
+        time.sleep(BOARD_CLEAR_REQUEST_BLINK_STEP_SECONDS)
+        runtime.led_driver.set_led_matrix(off_matrix)
+        time.sleep(BOARD_CLEAR_REQUEST_BLINK_STEP_SECONDS)
+
+    runtime.refresh_led_display()
 
 
 def build_argument_parser():
@@ -134,6 +162,7 @@ def main():
                 if state is not None and state.winner is not None:
                     print("Winner:", state.winner)
                     print("Game over detected. Remove all pieces to return to menu.")
+                    blink_all_leds_for_board_clear_request(runtime)
                     awaiting_board_clear_after_game_over = True
 
             time.sleep(args.scan_interval)
