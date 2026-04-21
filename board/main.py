@@ -5,12 +5,15 @@ from threading import Event, Lock, Thread
 
 from board.board_client import DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT
 from board.board_controller import BoardController
-from shared.constants import EventType, Player
+from board.led_driver import empty_led_matrix
+from shared.constants import EventType, LED_ON, Player, is_dark_square
 from shared.game_state import Coordinate, Move
 
 
 DEFAULT_HEARTBEAT_INTERVAL = 15.0
 DEFAULT_SCAN_INTERVAL = 0.05
+BOARD_CLEAR_REQUEST_BLINK_COUNT = 5
+BOARD_CLEAR_REQUEST_BLINK_STEP_SECONDS = 0.2
 
 
 class WebSocketConnectionClosedFallback(Exception):
@@ -95,6 +98,28 @@ def scan_matrix_is_empty(scan_matrix):
                 return False
 
     return True
+
+
+def build_all_playable_leds_on_matrix():
+    led_matrix = empty_led_matrix()
+
+    for row in range(8):
+        for col in range(8):
+            if is_dark_square(row, col):
+                led_matrix[row][col] = LED_ON
+
+    return led_matrix
+
+
+def blink_all_leds_for_board_clear_request(led_driver):
+    on_matrix = build_all_playable_leds_on_matrix()
+    off_matrix = empty_led_matrix()
+
+    for _ in range(BOARD_CLEAR_REQUEST_BLINK_COUNT):
+        led_driver.set_led_matrix(on_matrix)
+        time.sleep(BOARD_CLEAR_REQUEST_BLINK_STEP_SECONDS)
+        led_driver.set_led_matrix(off_matrix)
+        time.sleep(BOARD_CLEAR_REQUEST_BLINK_STEP_SECONDS)
 
 
 class BoardMain:
@@ -272,6 +297,8 @@ class BoardMain:
                 logging.info(
                     "Game over received from server. Remove all local pieces to return to menu."
                 )
+                blink_all_leds_for_board_clear_request(self.led_driver)
+                self.controller.refresh_led_display()
             return
 
         if event_type == EventType.ERROR:
