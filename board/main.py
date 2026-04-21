@@ -88,6 +88,15 @@ def get_local_player_from_board_id(board_id):
     return BOARD_PLAYER_BY_ID.get(normalized_board_id)
 
 
+def scan_matrix_is_empty(scan_matrix):
+    for row in range(8):
+        for col in range(8):
+            if scan_matrix[row][col]:
+                return False
+
+    return True
+
+
 class BoardMain:
     def __init__(
         self,
@@ -121,6 +130,7 @@ class BoardMain:
         self.stop_event = Event()
 
         self.scan_interval = DEFAULT_SCAN_INTERVAL
+        self.game_over_declared = False
 
     def build_server_uri(self):
         """Build the WebSocket URI for the server."""
@@ -135,6 +145,25 @@ class BoardMain:
         """Clear the stored WebSocket connection."""
         with self.websocket_lock:
             self.websocket = None
+
+    def close_websocket(self):
+        """Close the live WebSocket connection if one exists."""
+        with self.websocket_lock:
+            websocket = self.websocket
+
+        if websocket is None:
+            return
+
+        try:
+            websocket.close()
+        except Exception:
+            pass
+
+    def request_shutdown(self, reason_text):
+        """Stop worker loops and close the WebSocket connection."""
+        logging.info(reason_text)
+        self.stop_event.set()
+        self.close_websocket()
 
     def send_json(self, json_text):
         """Send one JSON message over the live WebSocket connection."""
@@ -236,6 +265,13 @@ class BoardMain:
                 logging.info("Received state_sync but local cache was already newer.")
 
             self.log_state_summary()
+
+            state = self.client.get_state()
+            if state is not None and state.winner is not None and not self.game_over_declared:
+                self.game_over_declared = True
+                logging.info(
+                    "Game over received from server. Remove all local pieces to return to menu."
+                )
             return
 
         if event_type == EventType.ERROR:
@@ -290,6 +326,7 @@ class BoardMain:
                 return
             except Exception:
                 logging.exception("Heartbeat send failed.")
+                self.request_shutdown("Stopping board runtime because heartbeat loop failed.")
                 return
 
     def scan_loop(self):
@@ -303,6 +340,19 @@ class BoardMain:
             try:
                 self.controller.client = self.client
                 self.controller.scanner = self.scanner
+
+                state = self.client.get_state()
+                if state is not None and state.winner is not None:
+                    self.game_over_declared = True
+                    stable_scan = self.controller.read_stable_scan_matrix()
+
+                    if stable_scan is not None and scan_matrix_is_empty(stable_scan):
+                        self.request_shutdown(
+                            "Local board cleared after game over. Returning to menu."
+                        )
+                        return
+
+                    continue
 
                 outbound_messages = self.controller.poll_scanner_and_build_outgoing_messages()
 
@@ -339,6 +389,7 @@ class BoardMain:
                 return
             except Exception:
                 logging.exception("Scan loop failed.")
+                self.request_shutdown("Stopping board runtime because scan loop failed.")
                 return
 
     def receive_loop(self):
