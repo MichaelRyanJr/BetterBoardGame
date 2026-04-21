@@ -889,3 +889,8 @@ class SinglePlayerRuntime:
                 "human_move": human_move
             }
         )
+
+    def shutdown(self):
+        """Clean up runtime-owned board resources."""
+        self.scanner.shutdown()
+        self.led_driver.shutdown()
