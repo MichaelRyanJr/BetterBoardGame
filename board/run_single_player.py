@@ -5,6 +5,9 @@ from board.single_player_runtime import SinglePlayerRuntime
 from shared.constants import Difficulty, Player
 
 
+POST_GAME_SCAN_INTERVAL_SECONDS = 0.05
+
+
 def parse_difficulty(value):
     text = value.strip().lower()
 
@@ -32,6 +35,15 @@ def parse_mode(value, allowed_values, argument_name):
     raise argparse.ArgumentTypeError(
         argument_name + " must be one of: " + allowed_text
     )
+
+
+def scan_is_empty(scan_matrix):
+    for row in range(8):
+        for col in range(8):
+            if scan_matrix[row][col]:
+                return False
+
+    return True
 
 
 def build_argument_parser():
@@ -81,6 +93,8 @@ def main():
         led_mode=args.led_mode
     )
 
+    awaiting_board_clear_after_game_over = False
+
     print("Single-player runtime started.")
     print("Human player:", Player.RED)
     print("Difficulty:", args.difficulty)
@@ -91,6 +105,16 @@ def main():
 
     try:
         while True:
+            if awaiting_board_clear_after_game_over:
+                stable_scan = runtime.read_stable_scan_matrix()
+
+                if stable_scan is not None and scan_is_empty(stable_scan):
+                    print("Board is empty after game over. Returning to menu.")
+                    break
+
+                time.sleep(POST_GAME_SCAN_INTERVAL_SECONDS)
+                continue
+
             result = runtime.process_next_scan()
 
             if result is not None:
@@ -109,6 +133,8 @@ def main():
                 state = result["state"]
                 if state is not None and state.winner is not None:
                     print("Winner:", state.winner)
+                    print("Game over detected. Remove all pieces to return to menu.")
+                    awaiting_board_clear_after_game_over = True
 
             time.sleep(args.scan_interval)
 
