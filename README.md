@@ -1,8 +1,12 @@
 # BetterBoardGame
 A physical checkers board capable of online multiplayer and single player vs an AI (minimax)
 
+To launch into the main menu:
 
-To run multiplayer mode:
+    cd ~/BetterBoardGame
+    python3 -m board.boot_mode_selector
+
+To run multiplayer mode directly:
 
   1st: on the server open the terminal and run
   
@@ -15,7 +19,7 @@ To run multiplayer mode:
     python3 -m board.main
 
 
-To run singleplayer:
+To run singleplayer directly:
 
   simply run the following commands with the wanted difficulty:
 
