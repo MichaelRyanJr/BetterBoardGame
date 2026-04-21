@@ -1,6 +1,6 @@
 import argparse
-import os
 import socket
+import subprocess
 import sys
 import time
 
@@ -12,7 +12,6 @@ from shared.game_state import Coordinate
 
 MODE_SINGLE_PLAYER_SQUARE = Coordinate(3, 0)
 MODE_MULTIPLAYER_SQUARE = Coordinate(4, 7)
-
 SINGLE_PLAYER_DIFFICULTY_SQUARES = {
     Difficulty.EASY: Coordinate(7, 0),
     Difficulty.MEDIUM: Coordinate(7, 2),
@@ -35,8 +34,8 @@ class BootModeSelector:
         - (7, 4) for hard
     - place a piece on (4, 7) to enter multiplayer
 
-    The choice squares blink with the same simple on/off style used for
-    replacement guidance during the game.
+    The menu remains the parent process. It launches the selected game as a
+    child process, waits for that process to exit, then returns to the menu.
     """
 
     def __init__(
@@ -51,11 +50,9 @@ class BootModeSelector:
         server_port=None,
         multiplayer_debug=False,
     ):
-        self.scanner = TokenScanner(
-            mode=scanner_mode,
-            stable_reads_required=stable_reads_required,
-        )
-        self.led_driver = LEDDriver(mode=led_mode)
+        self.scanner_mode = scanner_mode
+        self.led_mode = led_mode
+        self.stable_reads_required = stable_reads_required
         self.scan_interval_seconds = float(scan_interval_seconds)
         self.menu_blink_step_seconds = float(menu_blink_step_seconds)
         self.board_id = board_id
@@ -63,8 +60,51 @@ class BootModeSelector:
         self.server_port = server_port
         self.multiplayer_debug = bool(multiplayer_debug)
 
+        self.scanner = None
+        self.led_driver = None
+
         self.stage = "mode_select"
         self.blink_started_at = time.monotonic()
+
+        self.open_devices()
+        self.reset_to_menu()
+
+    def open_devices(self):
+        self.scanner = TokenScanner(
+            mode=self.scanner_mode,
+            stable_reads_required=self.stable_reads_required,
+        )
+        self.led_driver = LEDDriver(mode=self.led_mode)
+
+    def close_devices(self):
+        if self.led_driver is not None:
+            try:
+                self.led_driver.clear()
+            except Exception:
+                pass
+
+            try:
+                self.led_driver.shutdown()
+            except Exception:
+                pass
+
+            self.led_driver = None
+
+        if self.scanner is not None:
+            try:
+                self.scanner.shutdown()
+            except Exception:
+                pass
+
+            self.scanner = None
+
+    def reset_blink_phase(self):
+        self.blink_started_at = time.monotonic()
+
+    def reset_to_menu(self):
+        self.stage = "mode_select"
+        self.reset_blink_phase()
+        self.refresh_menu_leds()
 
     def square_is_occupied(self, scan_matrix, square):
         return bool(scan_matrix[square.row][square.col])
@@ -89,6 +129,9 @@ class BootModeSelector:
         return led_matrix
 
     def refresh_menu_leds(self):
+        if self.led_driver is None:
+            return
+
         blink_is_on = self.get_current_blink_is_on()
 
         if self.stage == "mode_select":
@@ -102,57 +145,56 @@ class BootModeSelector:
         led_matrix = self.build_blink_matrix(squares, blink_is_on)
         self.led_driver.set_led_matrix(led_matrix)
 
-    def reset_blink_phase(self):
-        self.blink_started_at = time.monotonic()
-
     def set_stage(self, stage):
         self.stage = stage
         self.reset_blink_phase()
         self.refresh_menu_leds()
 
-    def launch_single_player(self, difficulty):
-        self.led_driver.clear()
-        self.led_driver.shutdown()
-        self.scanner.shutdown()
-
-        args = [
+    def build_single_player_command(self, difficulty):
+        return [
             sys.executable,
             "-m",
             "board.run_single_player",
             "--difficulty",
             difficulty.value,
             "--scanner-mode",
-            "gpio",
+            self.scanner_mode,
             "--led-mode",
-            "hardware",
+            self.led_mode,
         ]
 
-        os.execv(sys.executable, args)
-
-    def launch_multiplayer(self):
-        self.led_driver.clear()
-        self.led_driver.shutdown()
-        self.scanner.shutdown()
-
-        args = [
+    def build_multiplayer_command(self):
+        command = [
             sys.executable,
             "-m",
             "board.main",
         ]
 
         if self.board_id is not None:
-            args.extend(["--board-id", self.board_id])
+            command.extend(["--board-id", self.board_id])
 
         if self.server_host is not None:
-            args.extend(["--server-host", self.server_host])
+            command.extend(["--server-host", self.server_host])
 
         if self.server_port is not None:
-            args.extend(["--server-port", str(self.server_port)])
+            command.extend(["--server-port", str(self.server_port)])
 
         if self.multiplayer_debug:
-            args.append("--debug")
+            command.append("--debug")
 
-        os.execv(sys.executable, args)
+        return command
+
+    def launch_child_process(self, command, label):
+        print("Launching", label + ":", " ".join(command))
+
+        self.close_devices()
+
+        try:
+            completed = subprocess.run(command)
+            print(label, "exited with return code", completed.returncode)
+        finally:
+            self.open_devices()
+            self.reset_to_menu()
 
     def get_selected_single_player_difficulty(self, scan_matrix):
         selected_difficulty = None
@@ -187,8 +229,8 @@ class BootModeSelector:
                 return
 
             if multiplayer_selected and not single_player_selected:
-                print("Launching multiplayer mode.")
-                self.launch_multiplayer()
+                command = self.build_multiplayer_command()
+                self.launch_child_process(command, "multiplayer")
                 return
 
             return
@@ -206,8 +248,8 @@ class BootModeSelector:
         selected_difficulty = self.get_selected_single_player_difficulty(scan_matrix)
 
         if selected_difficulty is not None:
-            print("Launching single-player mode:", selected_difficulty.value)
-            self.launch_single_player(selected_difficulty)
+            command = self.build_single_player_command(selected_difficulty)
+            self.launch_child_process(command, "single-player " + selected_difficulty.value)
 
     def run(self):
         print("Boot mode selector started.")
@@ -232,11 +274,7 @@ class BootModeSelector:
         except KeyboardInterrupt:
             print("\nStopping boot mode selector.")
         finally:
-            try:
-                self.led_driver.clear()
-            finally:
-                self.led_driver.shutdown()
-                self.scanner.shutdown()
+            self.close_devices()
 
 
 def parse_mode(value, allowed_values, argument_name):
