@@ -1,6 +1,7 @@
 import argparse
 import logging
 import socket
+import time
 from threading import Event, Lock, Thread
 
 from board.board_client import DEFAULT_SERVER_HOST, DEFAULT_SERVER_PORT
@@ -122,6 +123,18 @@ def blink_all_leds_for_board_clear_request(led_driver):
         time.sleep(BOARD_CLEAR_REQUEST_BLINK_STEP_SECONDS)
 
 
+def coordinate_list_to_text(squares):
+    if squares is None or len(squares) == 0:
+        return "[]"
+
+    parts = []
+
+    for square in squares:
+        parts.append("(" + str(square.row) + ", " + str(square.col) + ")")
+
+    return "[" + ", ".join(parts) + "]"
+
+
 class BoardMain:
     def __init__(
         self,
@@ -156,6 +169,90 @@ class BoardMain:
 
         self.scan_interval = DEFAULT_SCAN_INTERVAL
         self.game_over_declared = False
+        self.last_reported_illegal_return_squares = None
+        self.last_reported_capture_removal_squares = None
+
+    def print_status_block(
+        self,
+        status,
+        error_code=None,
+        message=None,
+        pending_capture_removals=None,
+        replay_squares=None,
+        state=None,
+        include_state_summary=False
+    ):
+        print("Status:", status, flush=True)
+
+        if error_code is not None:
+            print("Error:", error_code, flush=True)
+
+        if message:
+            print("Message:", message, flush=True)
+
+        if pending_capture_removals:
+            print(
+                "Pending capture removals:",
+                pending_capture_removals,
+                flush=True
+            )
+
+        if replay_squares:
+            print("Replay squares:", replay_squares, flush=True)
+
+        if include_state_summary and state is not None:
+            print("State version:", state.version, flush=True)
+            print("Move number:", state.move_number, flush=True)
+            print("Current player:", state.current_player, flush=True)
+
+        if state is not None and state.winner is not None:
+            print("Winner:", state.winner, flush=True)
+
+    def maybe_print_local_illegal_guidance(self):
+        current_squares = list(self.controller.pending_illegal_return_squares)
+
+        if self.last_reported_illegal_return_squares == current_squares:
+            return
+
+        self.last_reported_illegal_return_squares = list(current_squares)
+
+        if len(current_squares) == 0:
+            return
+
+        message = (
+            "The stable scan does not match any legal local move. "
+            "Put a piece back on: "
+            + coordinate_list_to_text(current_squares)
+            + "."
+        )
+
+        self.print_status_block(
+            status="error",
+            error_code="local_illegal_board_state",
+            message=message,
+            state=self.client.get_state()
+        )
+
+    def maybe_print_capture_removal_prompt(self):
+        current_squares = list(self.controller.pending_capture_removal_squares)
+
+        if self.last_reported_capture_removal_squares == current_squares:
+            return
+
+        self.last_reported_capture_removal_squares = list(current_squares)
+
+        if len(current_squares) == 0:
+            return
+
+        replay_squares = list(self.controller.pending_opponent_capture_replay_squares)
+
+        self.print_status_block(
+            status="waiting_for_capture_removal",
+            message="A captured local piece still needs to be removed from the board.",
+            pending_capture_removals=current_squares,
+            replay_squares=replay_squares,
+            state=self.client.get_state()
+        )
 
     def build_server_uri(self):
         """Build the WebSocket URI for the server."""
@@ -276,26 +373,34 @@ class BoardMain:
         )
 
     def handle_server_message(self, message_text):
-        """Pass one server JSON message into BoardController and log the result."""
+        """Pass one server JSON message into BoardController and print a user-friendly result."""
         self.controller.client = self.client
         result = self.controller.handle_incoming_json(message_text)
         event_type = result["event_type"]
 
         if event_type == EventType.STATE_SYNC:
             state_updated = result.get("state_updated", False)
+            state = self.client.get_state()
 
             if state_updated:
-                logging.info("Received state_sync and updated local cache.")
+                status = "state_sync_updated"
             else:
-                logging.info("Received state_sync but local cache was already newer.")
+                status = "state_sync_already_current"
+
+            self.print_status_block(
+                status=status,
+                state=state,
+                include_state_summary=True
+            )
 
             self.log_state_summary()
 
-            state = self.client.get_state()
             if state is not None and state.winner is not None and not self.game_over_declared:
                 self.game_over_declared = True
-                logging.info(
-                    "Game over received from server. Remove all local pieces to return to menu."
+                self.print_status_block(
+                    status="game_over",
+                    message="Game over detected. Remove all local pieces to return to menu.",
+                    state=state
                 )
                 blink_all_leds_for_board_clear_request(self.led_driver)
                 self.controller.refresh_led_display()
@@ -303,10 +408,11 @@ class BoardMain:
 
         if event_type == EventType.ERROR:
             error_info = result.get("error", {})
-            logging.warning(
-                "Server error: code=%s message=%s",
-                error_info.get("error_code"),
-                error_info.get("message")
+            self.print_status_block(
+                status="error",
+                error_code=error_info.get("error_code"),
+                message=error_info.get("message"),
+                state=self.client.get_state()
             )
             return
 
@@ -319,21 +425,38 @@ class BoardMain:
 
         if event_type == EventType.PIECE_REMOVED_REQUIRED:
             squares_to_remove = result.get("squares_to_remove", [])
-            logging.info(
-                "Server says %s captured piece(s) must be removed physically.",
-                len(squares_to_remove)
+            replay_squares = result.get("replay_squares", [])
+
+            self.print_status_block(
+                status="waiting_for_capture_removal",
+                message="A captured local piece still needs to be removed from the board.",
+                pending_capture_removals=squares_to_remove,
+                replay_squares=replay_squares,
+                state=self.client.get_state()
             )
             return
 
         if event_type == EventType.DESYNC_DETECTED:
-            logging.warning("Desync message received from server.")
+            desync_info = result.get("desync", {})
+            self.print_status_block(
+                status="error",
+                error_code="desync_detected",
+                message=desync_info.get("message"),
+                state=self.client.get_state()
+            )
             return
 
         if event_type == EventType.ILLEGAL_STATE_DETECTED:
-            logging.warning("Illegal-state message received from server.")
+            illegal_state = result.get("illegal_state", {})
+            self.print_status_block(
+                status="error",
+                error_code=illegal_state.get("error_code"),
+                message=illegal_state.get("message"),
+                state=self.client.get_state()
+            )
             return
 
-        logging.info("Received message of type %s", event_type)
+        print("Status:", "received_" + event_type.value, flush=True)
 
     def heartbeat_loop(self):
         """Send protocol heartbeats until the runtime stops."""
@@ -372,8 +495,15 @@ class BoardMain:
                 if state is not None and state.winner is not None:
                     self.game_over_declared = True
                     stable_scan = self.controller.read_stable_scan_matrix()
+                    self.maybe_print_capture_removal_prompt()
+                    self.maybe_print_local_illegal_guidance()
 
                     if stable_scan is not None and scan_matrix_is_empty(stable_scan):
+                        self.print_status_block(
+                            status="board_clear_complete",
+                            message="Board is empty after game over. Returning to menu.",
+                            state=state
+                        )
                         self.request_shutdown(
                             "Local board cleared after game over. Returning to menu."
                         )
@@ -382,6 +512,8 @@ class BoardMain:
                     continue
 
                 outbound_messages = self.controller.poll_scanner_and_build_outgoing_messages()
+                self.maybe_print_capture_removal_prompt()
+                self.maybe_print_local_illegal_guidance()
 
                 for message in outbound_messages:
                     event_type = EventType(message["event_type"])
@@ -450,6 +582,15 @@ class BoardMain:
         else:
             player_text = self.local_player.value
 
+        print("Multiplayer runtime started.", flush=True)
+        print("Board ID:", self.board_id, flush=True)
+        print("Local player:", player_text, flush=True)
+        print("Server host:", self.server_host, flush=True)
+        print("Server port:", self.server_port, flush=True)
+        print("Heartbeat interval:", self.heartbeat_interval, flush=True)
+        print("Scan interval:", self.scan_interval, flush=True)
+        print("Press Ctrl+C to stop.", flush=True)
+
         logging.info(
             "Connecting to %s as %s (local_player=%s)",
             uri,
@@ -460,6 +601,8 @@ class BoardMain:
         try:
             with connect(uri, open_timeout=10, ping_interval=20, ping_timeout=20) as websocket:
                 self.set_websocket(websocket)
+                print("Status:", "connected_to_server", flush=True)
+                print("Message:", "Connected to server.", flush=True)
                 logging.info("Connected to server.")
 
                 heartbeat_thread = Thread(
@@ -477,8 +620,11 @@ class BoardMain:
                 self.receive_loop()
 
         except KeyboardInterrupt:
+            print("\nStopping multiplayer runtime.", flush=True)
             logging.info("Board runtime stopped by user.")
         except connection_closed_exception:
+            print("Status:", "connection_closed", flush=True)
+            print("Message:", "Server connection closed.", flush=True)
             logging.info("Server connection closed.")
         finally:
             self.stop_event.set()
