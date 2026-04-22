@@ -9,7 +9,7 @@ except ImportError:
 
 
 # Columns are listed left to right on the real hardware.
-DEFAULT_COLUMN_PINS = [4, 17, 27, 22, 5, 6, 13, 19]
+DEFAULT_COLUMN_PINS = [26, 17, 27, 22, 5, 6, 13, 19]
 
 # Rows are listed top to bottom on the real hardware.
 DEFAULT_ROW_PINS = [21, 20, 16, 12, 25, 24, 23, 18]
