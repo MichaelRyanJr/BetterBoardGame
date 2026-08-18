@@ -1,39 +1,4 @@
 # BetterBoardGame
-A physical checkers board capable of online multiplayer and single player vs an AI (minimax)
+BetterBoardGame is a physical checkers system built using Raspberry Pi controllers, an 8×8 diode-isolated contact matrix, and MAX7219-controlled LEDs. The software translates physical piece positions into logical game states, validates moves, provides LED guidance, and supports both single-player games against a minimax AI and multiplayer games synchronized over WebSockets.
 
-To launch into the main menu:
-
-    cd ~/BetterBoardGame
-    python3 -m board.boot_mode_selector
-
-To run multiplayer mode directly:
-
-  1st: on the server open the terminal and run
-  
-    cd ~/BetterBoardGame
-    python3 -m server.server_main
-
-  2nd: on both boards run the following commands
-  
-    cd ~/BetterBoardGame
-    python3 -m board.main
-
-
-To run singleplayer directly:
-
-  simply run the following commands with the wanted difficulty:
-
-For Easy:
-
-    cd ~/BetterBoardGame
-    python3 -m board.run_single_player --difficulty easy
-
-For Medium:
-
-    cd ~/BetterBoardGame
-    python3 -m board.run_single_player --difficulty medium
-
-For Hard:
-
-    cd ~/BetterBoardGame
-    python3 -m board.run_single_player --difficulty hard
+The hardware interfaces are separated from the game logic through mockable scanner and LED drivers, allowing most of the system to be tested without access to the physical boards.
