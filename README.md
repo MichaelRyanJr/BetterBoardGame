@@ -3,6 +3,9 @@ BetterBoardGame is a physical checkers system built using Raspberry Pi controlle
 
 The hardware interfaces are separated from the game logic through mockable scanner and LED drivers, allowing most of the system to be tested without access to the physical boards.
 
+## System Architecture
+
+```mermaid
 flowchart TD
     P["Physical checker pieces"] --> S["TokenScanner"]
     S --> C["Board controller or single-player runtime"]
@@ -13,3 +16,4 @@ flowchart TD
     C <--> N["BoardClient"]
     N <--> W["WebSocket server"]
     W --> G["GameService"]
+```
