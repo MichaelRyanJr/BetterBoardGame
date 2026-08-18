@@ -3,6 +3,16 @@ BetterBoardGame is a physical checkers system built using Raspberry Pi controlle
 
 The hardware interfaces are separated from the game logic through mockable scanner and LED drivers, allowing most of the system to be tested without access to the physical boards.
 
+## Project Images
+<img width="4032" height="3024" alt="IMG_2532" src="https://github.com/user-attachments/assets/8cf96df3-84be-4f04-afa2-74109fb00401" />
+<img width="4284" height="5712" alt="IMG_2536" src="https://github.com/user-attachments/assets/85bd2b7b-3ae1-48b5-b1cc-d0e1a0d440d8" />
+<img width="4284" height="5712" alt="IMG_2535" src="https://github.com/user-attachments/assets/0a0c8f23-cfb4-4fc6-9e69-051aecd984b1" />
+<img width="5712" height="4284" alt="IMG_2534" src="https://github.com/user-attachments/assets/5b42c775-7456-4c8b-b0b3-0ea02e88bf54" />
+<img width="4284" height="5712" alt="IMG_2537" src="https://github.com/user-attachments/assets/b779cf6e-c0fd-4629-becf-dd050da380d8" />
+<img width="5712" height="4284" alt="IMG_2533" src="https://github.com/user-attachments/assets/41428026-3a63-4f00-9a25-613b15b8491b" />
+<img width="3024" height="4032" alt="IMG_3844" src="https://github.com/user-attachments/assets/96887fba-2da6-4d88-bb32-2476a08cc918" />
+
+
 ## System Architecture
 
 ```mermaid
