@@ -17,3 +17,30 @@ flowchart TD
     N <--> W["WebSocket server"]
     W --> G["GameService"]
 ```
+
+## Testing Without Raspberry Pi Hardware
+
+The core game logic, minimax AI, multiplayer protocol, server behavior, and single-player runtime can be tested on a normal computer. Tests that interact with the board use mock scanner and LED drivers instead of Raspberry Pi GPIO and SPI hardware.
+
+Run the mock-compatible automated tests from the repository root:
+
+```bash
+python3 -m unittest \
+  tests.test_ai \
+  tests.test_event_protocol_and_board_client \
+  tests.test_game_service \
+  tests.test_illegal_moves \
+  tests.test_rules \
+  tests.test_server_main \
+  tests.test_single_player_runtime
+```
+
+This currently runs 79 automated tests without requiring the physical boards.
+
+The scanner-to-LED pipeline can also be started using both devices in mock mode:
+
+```bash
+python3 tests/run_square_check.py --scanner-mode mock --led-mode mock
+```
+
+This verifies that the scanner and LED abstractions can initialize and operate without GPIO or SPI hardware.
