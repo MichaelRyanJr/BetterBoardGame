@@ -18,6 +18,27 @@ flowchart TD
     W --> G["GameService"]
 ```
 
+### How the System Works
+
+1. When a board powers on, a system service automatically launches the physical-board menu.
+2. The player selects single-player or multiplayer mode by placing a piece on the corresponding illuminated square. In single-player mode, the player then selects the AI difficulty on the board.
+3. Conductive checker pieces close contacts in an 8×8 diode-isolated matrix.
+4. `TokenScanner` reads the GPIO matrix, filters unstable readings, and converts the physical wiring layout into logical board coordinates.
+5. The board runtime compares the detected position with the current game state and determines whether a legal move occurred.
+6. In single-player mode, the minimax AI selects the opponent’s move. In multiplayer mode, both boards exchange state through an authoritative WebSocket server.
+7. `LEDDriver` converts logical feedback into the physical MAX7219 layout. The LEDs communicate menu options, opponent moves, captures, illegal board states, and king pieces.
+
+## Repository Structure
+
+| Directory | Purpose                                                                      |
+| --------- | ---------------------------------------------------------------------------- |
+| `ai/`     | Minimax search, board evaluation, and difficulty profiles                    |
+| `board/`  | GPIO scanning, LED control, startup menu, board runtimes, and network client |
+| `server/` | WebSocket server, event protocol, and authoritative game service             |
+| `shared/` | Game state, checkers rules, move validation, constants, and serialization    |
+| `tests/`  | Automated software tests and physical-hardware diagnostic utilities          |
+
+
 ## Testing Without Raspberry Pi Hardware
 
 The core game logic, minimax AI, multiplayer protocol, server behavior, and single-player runtime can be tested on a normal computer. Tests that interact with the board use mock scanner and LED drivers instead of Raspberry Pi GPIO and SPI hardware.
